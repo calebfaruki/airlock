@@ -63,8 +63,8 @@ fn main() {
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
-            Err(_) => {
-                eprintln!("airlock: daemon connection lost");
+            Err(e) => {
+                eprintln!("airlock: daemon connection lost: {e}");
                 process::exit(1);
             }
         };
@@ -107,6 +107,6 @@ fn main() {
         }
     }
 
-    eprintln!("airlock: daemon connection lost");
+    eprintln!("airlock: daemon disconnected before sending response");
     process::exit(1);
 }

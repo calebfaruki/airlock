@@ -287,6 +287,36 @@ exit 0
 
         let _ = std::fs::remove_file(&sock);
     }
+
+    #[tokio::test]
+    async fn cwd_translation_failure_returns_explicit_error() {
+        let sock = test_socket_path("cwd-fail");
+        let _handle = start_daemon(&sock).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"git","args":["status"],"cwd":"/workspace","container_id":"0000000000000000000000000000000000000000000000000000000000000000"}}"#;
+        let lines = send_and_collect(&sock, request).await;
+
+        let resp: AnyResponse = serde_json::from_str(&lines[0]).unwrap();
+        assert!(resp.error.is_some(), "cwd translation failure should produce error");
+        assert!(resp.result.is_none());
+        let message = resp.error.unwrap()["message"].as_str().unwrap().to_string();
+        assert!(
+            message.contains("cwd translation failed"),
+            "error should mention cwd translation, got: {message}"
+        );
+
+        let has_output = lines.iter().any(|l| {
+            serde_json::from_str::<AnyResponse>(l)
+                .ok()
+                .and_then(|r| r.method)
+                .as_deref()
+                == Some("output")
+        });
+        assert!(!has_output, "command should not have executed");
+
+        let _ = std::fs::remove_file(&sock);
+    }
 }
 
 mod faithful_proxy {

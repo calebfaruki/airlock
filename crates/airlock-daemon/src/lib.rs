@@ -367,12 +367,22 @@ pub async fn handle_connection(
         }
     }
 
-    let host_cwd = if let (Some(ref cid), Some(ref cwd)) = (&params.container_id, &params.cwd) {
-        resolve_host_cwd(cid, cwd, &mount_cache)
-            .await
-            .unwrap_or_else(|| cwd.clone())
-    } else {
-        params.cwd.clone().unwrap_or_else(|| ".".to_string())
+    let host_cwd = match (&params.container_id, &params.cwd) {
+        (Some(cid), Some(cwd)) => match resolve_host_cwd(cid, cwd, &mount_cache).await {
+            Some(path) => path,
+            None => {
+                let reason =
+                    format!("cwd translation failed: could not inspect container {cid}");
+                let err = build_error_response(id, -32603, reason.clone());
+                writer
+                    .write_all(&send_line(&serde_json::to_string(&err)?))
+                    .await?;
+                log_denied(&logger, id, &params, start, reason);
+                return Ok(());
+            }
+        },
+        (None, Some(cwd)) => cwd.clone(),
+        (_, None) => ".".to_string(),
     };
 
     // Acquire per-command lock if not concurrent

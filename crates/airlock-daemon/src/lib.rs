@@ -371,8 +371,7 @@ pub async fn handle_connection(
         (Some(cid), Some(cwd)) => match resolve_host_cwd(cid, cwd, &mount_cache).await {
             Some(path) => path,
             None => {
-                let reason =
-                    format!("cwd translation failed: could not inspect container {cid}");
+                let reason = format!("cwd translation failed: could not inspect container {cid}");
                 let err = build_error_response(id, -32603, reason.clone());
                 writer
                     .write_all(&send_line(&serde_json::to_string(&err)?))

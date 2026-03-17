@@ -298,7 +298,10 @@ exit 0
         let lines = send_and_collect(&sock, request).await;
 
         let resp: AnyResponse = serde_json::from_str(&lines[0]).unwrap();
-        assert!(resp.error.is_some(), "cwd translation failure should produce error");
+        assert!(
+            resp.error.is_some(),
+            "cwd translation failure should produce error"
+        );
         assert!(resp.result.is_none());
         let message = resp.error.unwrap()["message"].as_str().unwrap().to_string();
         assert!(

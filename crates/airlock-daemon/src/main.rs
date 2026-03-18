@@ -200,8 +200,53 @@ async fn main() {
             }
             return;
         }
+        "check" => {
+            let mut registry = CommandRegistry::new();
+            registry.load_builtins();
+
+            let user_dir = user_commands_dir();
+            let mut has_errors = false;
+
+            if user_dir.exists() {
+                if let Ok(entries) = std::fs::read_dir(&user_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                            continue;
+                        }
+                        let name = path.file_stem().unwrap().to_string_lossy();
+                        let content = match std::fs::read_to_string(&path) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                eprintln!("  error: {name} — {e}");
+                                has_errors = true;
+                                continue;
+                            }
+                        };
+                        match airlock_daemon::commands::CommandModule::parse(&content) {
+                            Ok(_) => eprintln!("  ok: {name}"),
+                            Err(e) => {
+                                eprintln!("  error: {name} — {e}");
+                                has_errors = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            let commands = registry.command_names();
+            eprintln!("airlock: {} built-in commands", commands.len());
+
+            if has_errors {
+                eprintln!("airlock: validation failed");
+                std::process::exit(1);
+            } else {
+                eprintln!("airlock: all modules valid");
+            }
+            return;
+        }
         _ => {
-            eprintln!("usage: airlock-daemon <start|version|init|show|diff|eject>");
+            eprintln!("usage: airlock-daemon <start|version|init|check|show|diff|eject>");
             std::process::exit(1);
         }
     }
@@ -239,7 +284,16 @@ async fn main() {
     ));
 
     let mount_cache: MountCache = Arc::new(RwLock::new(HashMap::new()));
-    let registry = Arc::new(load_registry());
+    let registry = load_registry();
+    eprintln!(
+        "airlock: loaded commands: {}",
+        registry.command_names().join(", ")
+    );
+    let overrides = registry.user_override_names();
+    if !overrides.is_empty() {
+        eprintln!("airlock: user overrides: {}", overrides.join(", "));
+    }
+    let registry = Arc::new(registry);
     let cmd_locks: ConcurrencyLocks = Arc::new(RwLock::new(HashMap::new()));
     let hook_runner = Arc::new(HookRunner::new(hooks_dir()));
 

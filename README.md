@@ -54,26 +54,43 @@ RUN ln -s airlock-shim /usr/local/airlock/bin/git \
     && ln -s airlock-shim /usr/local/airlock/bin/aws
 ```
 
+### Create a Profile
+
+Profiles scope credentials to individual containers. Each profile gets its own unix socket. Create at least one before starting the daemon:
+
+```sh
+# Minimal profile — all commands, no credential injection
+touch ~/.config/airlock/profiles/default.toml
+
+# Restricted profile — only git and gh, with a specific SSH key
+cat > ~/.config/airlock/profiles/agent-a.toml << 'EOF'
+commands = ["git", "gh"]
+
+[env]
+set = { GIT_SSH_COMMAND = "ssh -i ~/.ssh/project_a_key" }
+EOF
+```
+
 ### Docker Run
+
+Mount the profile's socket into the container. The shim always connects to `/run/docker-airlock.sock` inside the container.
+
+Linux:
 
 ```sh
 docker run \
-    -v /var/run/docker-airlock.sock:/run/docker-airlock.sock \
+    -v /run/user/$(id -u)/airlock/sockets/agent-a.sock:/run/docker-airlock.sock \
     your-image
 ```
 
-### Docker Desktop (macOS)
-
-Docker Desktop runs containers inside a Linux VM via VirtioFS, which remaps bind-mounted socket permissions to `root:root 0660`. Non-root container users need the root group added:
+Docker Desktop (macOS) — requires `--group-add 0` for non-root container users (VirtioFS remaps socket permissions to `root:root 0660`):
 
 ```sh
 docker run \
     --group-add 0 \
-    -v ~/.config/airlock/docker-airlock.sock:/run/docker-airlock.sock \
+    -v ~/.config/airlock/sockets/agent-a.sock:/run/docker-airlock.sock \
     your-image
 ```
-
-On Linux, Docker runs natively and `--group-add 0` is not needed.
 
 ## Usage
 
@@ -85,6 +102,8 @@ airlock-daemon init              # Install as system service (systemd/launchd)
 airlock-daemon init --uninstall  # Remove system service
 airlock-daemon check             # Validate all command modules
 airlock-daemon version           # Print version
+airlock-daemon profile list      # List profiles and socket paths
+airlock-daemon profile show <n>  # Print a profile's TOML
 ```
 
 ### Command Directory
@@ -140,6 +159,54 @@ airlock: user overrides: gh
 ```
 
 Run `airlock-daemon check` before restarting to catch TOML syntax errors and missing binaries early.
+
+## Profiles
+
+Profiles scope credentials to individual containers. Each profile is a TOML file in `~/.config/airlock/profiles/`. The daemon creates one unix socket per profile at startup.
+
+### Schema
+
+```toml
+# Optional: whitelist of commands. Omit to allow all.
+commands = ["git", "gh"]
+
+# Optional: environment variables injected before command execution.
+[env]
+set = { GIT_SSH_COMMAND = "ssh -i ~/.ssh/project_a_key", AWS_PROFILE = "readonly" }
+```
+
+An empty file is a valid profile — it grants access to all commands with no additional env vars.
+
+### Env Merge Order
+
+Three sources, applied in order:
+
+1. **Command module `[env] strip`** — removes dangerous vars. Always wins.
+2. **Profile `[env] set`** — injects credential vars.
+3. **Command module `[env] set`** — injects hardening vars. Overrides profile on conflict.
+
+A profile cannot override security hardening set by a command module.
+
+### Socket Paths
+
+| Platform | Path |
+|----------|------|
+| macOS | `~/.config/airlock/sockets/<profile>.sock` |
+| Linux | `$XDG_RUNTIME_DIR/airlock/sockets/<profile>.sock` |
+
+### No Profiles = No Start
+
+The daemon requires at least one profile. If `~/.config/airlock/profiles/` is empty or missing, the daemon refuses to start.
+
+## Upgrading from v1
+
+v1 used a single shared socket. v2 requires profiles:
+
+1. Create at least one profile: `touch ~/.config/airlock/profiles/default.toml`
+2. Re-run `airlock init` to create the new directories
+3. Update `docker run` commands to mount the profile socket:
+   - Linux: `-v /run/user/$(id -u)/airlock/sockets/default.sock:/run/docker-airlock.sock`
+   - macOS: `-v ~/.config/airlock/sockets/default.sock:/run/docker-airlock.sock`
 
 ## Security Model
 

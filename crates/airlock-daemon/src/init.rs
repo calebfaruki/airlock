@@ -87,9 +87,20 @@ pub fn run_uninstall(config: &InitConfig) -> Result<(), Box<dyn std::error::Erro
 pub fn create_directories(config: &InitConfig) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let mut created = Vec::new();
 
+    let sockets_dir = if cfg!(target_os = "macos") {
+        config.config_dir.join("sockets")
+    } else {
+        match std::env::var("XDG_RUNTIME_DIR") {
+            Ok(dir) => PathBuf::from(dir).join("airlock").join("sockets"),
+            Err(_) => config.config_dir.join("sockets"),
+        }
+    };
+
     let dirs = [
         config.config_dir.join("hooks"),
         config.config_dir.join("commands"),
+        config.config_dir.join("profiles"),
+        sockets_dir,
         config.data_dir.clone(),
     ];
 
@@ -354,7 +365,7 @@ fn remove_service(config: &InitConfig) -> Result<(), Box<dyn std::error::Error>>
 }
 
 #[cfg(test)]
-mod tests {
+mod idempotent_setup {
     use super::*;
 
     fn temp_config(base: &Path) -> InitConfig {
@@ -373,9 +384,11 @@ mod tests {
         let config = temp_config(&base);
 
         let created = create_directories(&config).unwrap();
-        assert_eq!(created.len(), 3);
+        assert_eq!(created.len(), 5);
         assert!(config.config_dir.join("hooks").is_dir());
         assert!(config.config_dir.join("commands").is_dir());
+        assert!(config.config_dir.join("profiles").is_dir());
+        assert!(config.config_dir.join("sockets").is_dir());
         assert!(config.data_dir.is_dir());
 
         // Idempotent: second call creates nothing

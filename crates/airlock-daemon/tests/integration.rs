@@ -65,7 +65,16 @@ async fn start_daemon_with_profile(
     let hook_runner = Arc::new(HookRunner::new(hooks_dir.to_path_buf()));
     let logger = Arc::new(AuditLogger::new(log_path.to_path_buf(), 50, 5));
     tokio::spawn(async move {
-        run_daemon(listeners, profiles, cache, registry, locks, hook_runner, logger).await;
+        run_daemon(
+            listeners,
+            profiles,
+            cache,
+            registry,
+            locks,
+            hook_runner,
+            logger,
+        )
+        .await;
     })
 }
 
@@ -618,5 +627,4 @@ mod audit_log {
 
         let _ = std::fs::remove_file(&sock);
     }
-
 }

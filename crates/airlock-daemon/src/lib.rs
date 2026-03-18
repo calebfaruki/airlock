@@ -693,9 +693,7 @@ pub async fn run_daemon(
                 let h = hooks.clone();
                 let lg = log.clone();
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        handle_connection(stream, n, p, c, r, l, h, lg).await
-                    {
+                    if let Err(e) = handle_connection(stream, n, p, c, r, l, h, lg).await {
                         eprintln!("connection error: {e}");
                     }
                 });

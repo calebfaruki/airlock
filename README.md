@@ -1,6 +1,6 @@
 # Airlock
 
-An open-source CLI proxy that isolates Docker container credentials by proxying commands over a unix socket to the host machine. Containers never hold SSH keys, API tokens, or credential files.
+Credential isolation for CLI tools in Docker containers. Proxies git, aws, terraform, and other commands that need SSH keys, cloud configs, or local credentials  without mounting secrets into the container.
 
 ## How It Works
 
@@ -14,6 +14,22 @@ Three components:
 
 The shim sends a request, the daemon looks it up in the command directory, applies deny rules and environment isolation, executes the command, and streams output back. The container never sees credentials — they live on the host.
 
+## Why Airlock?
+
+Network-level credential proxies (Docker Sandboxes, NemoClaw) protect HTTP API keys by intercepting outbound HTTPS requests and injecting auth headers. But many developer tools don't authenticate over HTTP — they use local files:
+
+- **git** — SSH keys, credential helpers
+- **aws / gcloud / az** — IAM credentials, service account keys
+- **terraform** — inherits cloud CLI credentials
+- **docker push/pull** — registry auth in `~/.docker/config.json`
+- **kubectl / helm** — kubeconfig with cluster certificates
+- **npm / pip / cargo** — registry tokens for private packages
+- **ssh / scp** — SSH keys
+
+These tools authenticate via files on the host filesystem. No network proxy can intercept that. Airlock solves this by proxying the CLI commands themselves — the container asks the host to run the command, and the host executes it with real credentials. The container never sees the keys.
+
+Use network proxies for HTTP API keys. Use Airlock for everything else.
+
 ## Installation
 
 ### Quick Install (Linux/macOS)
@@ -23,39 +39,6 @@ curl -fsSL https://raw.githubusercontent.com/calebfaruki/airlock/main/install.sh
 ```
 
 This downloads the daemon, installs it to `~/.local/bin/`, and runs `airlock init` to set up the system service.
-
-### macOS: Homebrew PATH
-
-On macOS, `launchd` runs the daemon with a minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`) that does not include Homebrew's `/opt/homebrew/bin`. If your CLI tools are installed via Homebrew, the daemon won't find them.
-
-Two options:
-
-**Option A: Absolute paths in command modules** (recommended — explicit and auditable)
-
-Eject the built-in and set `bin` to the full path:
-
-```sh
-airlock-daemon eject git
-# Edit ~/.config/airlock/commands/git.toml
-# Change: bin = "git"
-# To:     bin = "/opt/homebrew/bin/git"
-```
-
-Run `which <command>` to find the path. Repeat for each Homebrew-installed tool.
-
-**Option B: Add Homebrew to the launchd PATH**
-
-Edit `~/Library/LaunchAgents/dev.airlock.daemon.plist` and add an `EnvironmentVariables` key:
-
-```xml
-<key>EnvironmentVariables</key>
-<dict>
-    <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-</dict>
-```
-
-Then reload: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/dev.airlock.daemon.plist && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.airlock.daemon.plist`
 
 ### Container Setup
 
@@ -81,6 +64,17 @@ docker run \
 
 On macOS, use `~/.config/airlock/docker-airlock.sock` as the host path.
 
+### macOS Note
+
+The launchd service inherits a minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`). Tools installed via Homebrew, nix, or cargo won't be found by default. Use absolute paths in command modules:
+
+```toml
+[command]
+bin = "/opt/homebrew/bin/gh"
+```
+
+Run `airlock-daemon check` to validate all modules before restarting the daemon.
+
 ## Usage
 
 ### Daemon
@@ -89,6 +83,7 @@ On macOS, use `~/.config/airlock/docker-airlock.sock` as the host path.
 airlock-daemon start             # Run daemon in foreground
 airlock-daemon init              # Install as system service (systemd/launchd)
 airlock-daemon init --uninstall  # Remove system service
+airlock-daemon check             # Validate all command modules
 airlock-daemon version           # Print version
 ```
 
@@ -128,6 +123,25 @@ Unknown commands are rejected. To add a new command, create a TOML file in `~/.c
 [command]
 bin = "deploy-cli"
 ```
+
+## Built-in Protections
+
+Built-in command modules ship with security hardening based on known attack vectors. Each module has a [`SECURITY.md`](crates/airlock-daemon/src/commands/builtins/) documenting the threat model behind every deny rule and environment variable.
+
+Run `airlock-daemon show <command>` to see the active configuration. Run `airlock-daemon eject <command>` to customize.
+
+## Observability
+
+On startup, the daemon prints loaded commands and any user overrides to stderr:
+
+```
+airlock: loaded commands: aws, docker, gh, git, ssh, terraform
+airlock: user overrides: gh
+```
+
+If a command fails because the binary isn't found, the error message hints at using an absolute path — the most common issue on macOS where launchd has a minimal PATH.
+
+Run `airlock-daemon check` before restarting to catch TOML syntax errors and missing binaries early.
 
 ## Security Model
 

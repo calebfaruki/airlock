@@ -185,16 +185,23 @@ async fn resolve_host_cwd(
         }
     }
 
-    let output = Command::new("docker")
+    let output = match Command::new("docker")
         .arg("inspect")
         .arg("--format")
         .arg("{{json .Mounts}}")
         .arg(container_id)
         .output()
         .await
-        .ok()?;
+    {
+        Ok(output) => output,
+        Err(_) => {
+            eprintln!("airlock: docker not found — the daemon's PATH may not include docker's install location");
+            return None;
+        }
+    };
 
     if !output.status.success() {
+        eprintln!("airlock: docker inspect failed for container {container_id} — is docker in the daemon's PATH?");
         return None;
     }
 
@@ -371,7 +378,7 @@ pub async fn handle_connection(
         (Some(cid), Some(cwd)) => match resolve_host_cwd(cid, cwd, &mount_cache).await {
             Some(path) => path,
             None => {
-                let reason = format!("cwd translation failed: could not inspect container {cid}");
+                let reason = format!("cwd translation failed: docker inspect failed for container {cid} — is docker in the daemon's PATH?");
                 let err = build_error_response(id, -32603, reason.clone());
                 writer
                     .write_all(&send_line(&serde_json::to_string(&err)?))

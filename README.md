@@ -62,18 +62,18 @@ docker run \
     your-image
 ```
 
-On macOS, use `~/.config/airlock/docker-airlock.sock` as the host path.
+### Docker Desktop (macOS)
 
-### macOS Note
+Docker Desktop runs containers inside a Linux VM via VirtioFS, which remaps bind-mounted socket permissions to `root:root 0660`. Non-root container users need the root group added:
 
-The launchd service inherits a minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`). Tools installed via Homebrew, nix, or cargo won't be found by default. Use absolute paths in command modules:
-
-```toml
-[command]
-bin = "/opt/homebrew/bin/gh"
+```sh
+docker run \
+    --group-add 0 \
+    -v ~/.config/airlock/docker-airlock.sock:/run/docker-airlock.sock \
+    your-image
 ```
 
-Run `airlock-daemon check` to validate all modules before restarting the daemon.
+On Linux, Docker runs natively and `--group-add 0` is not needed.
 
 ## Usage
 
@@ -138,8 +138,6 @@ On startup, the daemon prints loaded commands and any user overrides to stderr:
 airlock: loaded commands: aws, docker, gh, git, ssh, terraform
 airlock: user overrides: gh
 ```
-
-If a command fails because the binary isn't found, the error message hints at using an absolute path — the most common issue on macOS where launchd has a minimal PATH.
 
 Run `airlock-daemon check` before restarting to catch TOML syntax errors and missing binaries early.
 

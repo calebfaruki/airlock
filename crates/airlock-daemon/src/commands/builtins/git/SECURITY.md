@@ -12,6 +12,14 @@
 | `-c` | Short form of `--config` |
 | `--exec-path` | Redirects git to load sub-programs from attacker-controlled directory |
 | `--template` | Copies hooks from a local directory into cloned repo — hooks execute on clone |
+| `--config-env` | Injects git config from environment variables — bypasses `-c` deny |
+| `--receive-pack` | Overrides receive-pack binary path — arbitrary command execution on push |
+| `credential` | Subcommand that extracts host credentials via `credential fill/approve/reject` |
+| `daemon` | Starts a git daemon — arbitrary network access from the host |
+| `shell` | Restricted login shell — not needed in proxy context, potential escape vector |
+| `upload-pack` | Transport plumbing — direct pack access bypassing normal fetch flow |
+| `receive-pack` | Transport plumbing — direct pack access bypassing normal push flow |
+| `upload-archive` | Transport plumbing — archive generation over transport protocol |
 
 ## Stripped Env Vars
 

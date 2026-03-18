@@ -193,12 +193,12 @@ fn start_systemd_service(_config: &InitConfig) -> Result<(), Box<dyn std::error:
 }
 
 fn stop_systemd_service(_config: &InitConfig) -> Result<(), Box<dyn std::error::Error>> {
-    let _ = std::process::Command::new("systemctl")
+    std::process::Command::new("systemctl")
         .args(["--user", "stop", "airlock.service"])
-        .status();
-    let _ = std::process::Command::new("systemctl")
+        .status()?;
+    std::process::Command::new("systemctl")
         .args(["--user", "disable", "airlock.service"])
-        .status();
+        .status()?;
     Ok(())
 }
 
@@ -292,9 +292,9 @@ fn start_launchd_service(_config: &InitConfig) -> Result<(), Box<dyn std::error:
 fn stop_launchd_service(_config: &InitConfig) -> Result<(), Box<dyn std::error::Error>> {
     let uid = get_uid();
     let path = launchd_plist_path();
-    let _ = std::process::Command::new("launchctl")
+    std::process::Command::new("launchctl")
         .args(["bootout", &format!("gui/{uid}"), &path.to_string_lossy()])
-        .status();
+        .status()?;
     Ok(())
 }
 

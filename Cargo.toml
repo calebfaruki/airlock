@@ -1,3 +1,15 @@
 [workspace]
 members = ["crates/airlock-shim", "crates/airlock-daemon"]
 resolver = "2"
+
+[workspace.lints.rust]
+dead_code = "deny"
+unused_imports = "deny"
+unused_variables = "deny"
+unused_mut = "deny"
+unreachable_code = "deny"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+unused_self = "warn"
+unnecessary_wraps = "warn"

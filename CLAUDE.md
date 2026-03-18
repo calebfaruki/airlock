@@ -326,6 +326,12 @@ These must never be violated:
 - **Not a framework.** It is a single-purpose proxy. No opinions on agent architecture.
 - **Not a timeout manager.** Commands run until they finish. No artificial timeouts or output size limits.
 
+## Lints
+
+Workspace-wide lint configuration lives in the root `Cargo.toml` under `[workspace.lints]`. Individual crates inherit via `[lints] workspace = true`. Do not add lint attributes (`#![deny(...)]`, `#![warn(...)]`) in source files.
+
+After any refactor, run `cargo clippy --workspace` and fix all warnings before committing. Dead code, unused imports, and unused variables are denied (compile errors, not warnings).
+
 ## Implementation Phases
 
 1. **Core IPC** — shim + daemon + git hardcoded. Prove the socket works end-to-end with streaming.

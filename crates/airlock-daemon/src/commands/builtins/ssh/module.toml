@@ -1,0 +1,5 @@
+[command]
+bin = "ssh"
+
+[exec]
+concurrent = true

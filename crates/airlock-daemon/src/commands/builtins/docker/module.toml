@@ -1,0 +1,11 @@
+[command]
+bin = "docker"
+
+[deny]
+args = ["--privileged"]
+
+[env]
+strip = ["DOCKER_HOST", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH"]
+
+[exec]
+concurrent = true

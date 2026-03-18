@@ -1,0 +1,8 @@
+[command]
+bin = "terraform"
+
+[deny]
+args = ["destroy", "force-unlock"]
+
+[exec]
+concurrent = false

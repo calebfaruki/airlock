@@ -422,7 +422,16 @@ pub async fn handle_connection(
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            let msg = format!("failed to execute {}: {e}", module.command.bin);
+            let msg = if e.kind() == std::io::ErrorKind::NotFound
+                && !module.command.bin.contains('/')
+            {
+                format!(
+                    "failed to execute {}: {e} (hint: use an absolute path in the command module, e.g. bin = \"/opt/homebrew/bin/{}\")",
+                    module.command.bin, module.command.bin
+                )
+            } else {
+                format!("failed to execute {}: {e}", module.command.bin)
+            };
             let err = build_error_response(id, -32603, msg.clone());
             writer
                 .write_all(&send_line(&serde_json::to_string(&err)?))

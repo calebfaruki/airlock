@@ -24,6 +24,39 @@ curl -fsSL https://raw.githubusercontent.com/calebfaruki/airlock/main/install.sh
 
 This downloads the daemon, installs it to `~/.local/bin/`, and runs `airlock init` to set up the system service.
 
+### macOS: Homebrew PATH
+
+On macOS, `launchd` runs the daemon with a minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`) that does not include Homebrew's `/opt/homebrew/bin`. If your CLI tools are installed via Homebrew, the daemon won't find them.
+
+Two options:
+
+**Option A: Absolute paths in command modules** (recommended — explicit and auditable)
+
+Eject the built-in and set `bin` to the full path:
+
+```sh
+airlock-daemon eject git
+# Edit ~/.config/airlock/commands/git.toml
+# Change: bin = "git"
+# To:     bin = "/opt/homebrew/bin/git"
+```
+
+Run `which <command>` to find the path. Repeat for each Homebrew-installed tool.
+
+**Option B: Add Homebrew to the launchd PATH**
+
+Edit `~/Library/LaunchAgents/dev.airlock.daemon.plist` and add an `EnvironmentVariables` key:
+
+```xml
+<key>EnvironmentVariables</key>
+<dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+</dict>
+```
+
+Then reload: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/dev.airlock.daemon.plist && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.airlock.daemon.plist`
+
 ### Container Setup
 
 Download the shim from [releases](https://github.com/calebfaruki/airlock/releases) and add to your Dockerfile:

@@ -113,4 +113,16 @@ impl CommandRegistry {
     pub fn has_user_override(&self, command: &str) -> bool {
         self.user_sources.contains_key(command)
     }
+
+    pub fn command_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.modules.keys().map(|s| s.as_str()).collect();
+        names.sort();
+        names
+    }
+
+    pub fn user_override_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.user_sources.keys().map(|s| s.as_str()).collect();
+        names.sort();
+        names
+    }
 }

@@ -2,7 +2,8 @@ use airlock_daemon::commands::CommandRegistry;
 use airlock_daemon::config::{self, Config};
 use airlock_daemon::hooks::HookRunner;
 use airlock_daemon::logging::AuditLogger;
-use airlock_daemon::{run_daemon, ConcurrencyLocks, MountCache};
+use airlock_daemon::profile::Profile;
+use airlock_daemon::{run_daemon, ConcurrencyLocks, MountCache, ProfileMap};
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
@@ -10,21 +11,24 @@ use std::sync::Arc;
 use tokio::net::UnixListener;
 use tokio::sync::RwLock;
 
-fn socket_path() -> PathBuf {
-    if cfg!(target_os = "macos") {
-        let home = env::var("HOME").expect("HOME not set");
-        PathBuf::from(home)
-            .join(".config")
-            .join("airlock")
-            .join("docker-airlock.sock")
-    } else {
-        PathBuf::from("/var/run/docker-airlock.sock")
-    }
-}
-
 fn config_dir() -> PathBuf {
     let home = env::var("HOME").expect("HOME not set");
     PathBuf::from(home).join(".config").join("airlock")
+}
+
+fn profiles_dir() -> PathBuf {
+    config_dir().join("profiles")
+}
+
+fn sockets_dir() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        config_dir().join("sockets")
+    } else {
+        match env::var("XDG_RUNTIME_DIR") {
+            Ok(dir) => PathBuf::from(dir).join("airlock").join("sockets"),
+            Err(_) => config_dir().join("sockets"),
+        }
+    }
 }
 
 fn user_commands_dir() -> PathBuf {
@@ -245,32 +249,148 @@ async fn main() {
             }
             return;
         }
+        "profile" => {
+            let sub = args.get(2).map(|s| s.as_str()).unwrap_or("help");
+            match sub {
+                "list" => {
+                    let prof_dir = profiles_dir();
+                    let sock_dir = sockets_dir();
+                    if !prof_dir.exists() {
+                        eprintln!("no profiles directory at {}", prof_dir.display());
+                        std::process::exit(1);
+                    }
+                    let mut names: Vec<String> = Vec::new();
+                    if let Ok(entries) = std::fs::read_dir(&prof_dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                                continue;
+                            }
+                            if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
+                                names.push(name.to_string());
+                            }
+                        }
+                    }
+                    names.sort();
+                    for name in &names {
+                        let sock = sock_dir.join(format!("{name}.sock"));
+                        println!("{name}\t{}", sock.display());
+                    }
+                    if names.is_empty() {
+                        eprintln!("no profiles found in {}", prof_dir.display());
+                    }
+                }
+                "show" => {
+                    let name = match args.get(3) {
+                        Some(n) => n,
+                        None => {
+                            eprintln!("usage: airlock-daemon profile show <name>");
+                            std::process::exit(1);
+                        }
+                    };
+                    let path = profiles_dir().join(format!("{name}.toml"));
+                    match std::fs::read_to_string(&path) {
+                        Ok(content) => print!("{content}"),
+                        Err(e) => {
+                            eprintln!("failed to read profile '{name}': {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                _ => {
+                    eprintln!("usage: airlock-daemon profile <list|show>");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         _ => {
-            eprintln!("usage: airlock-daemon <start|version|init|check|show|diff|eject>");
+            eprintln!("usage: airlock-daemon <start|version|init|check|show|diff|eject|profile>");
             std::process::exit(1);
         }
     }
 
-    let path = socket_path();
+    // Load profiles
+    let prof_dir = profiles_dir();
+    let mut profile_map: HashMap<String, Profile> = HashMap::new();
 
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            eprintln!("failed to create socket directory: {e}");
-            std::process::exit(1);
+    if prof_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&prof_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                    continue;
+                }
+                let name = match path.file_stem().and_then(|s| s.to_str()) {
+                    Some(n) => n.to_string(),
+                    None => continue,
+                };
+                let content = match std::fs::read_to_string(&path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("airlock: failed to read profile '{}': {e}", path.display());
+                        std::process::exit(1);
+                    }
+                };
+                match Profile::parse(&content) {
+                    Ok(profile) => {
+                        profile_map.insert(name, profile);
+                    }
+                    Err(e) => {
+                        eprintln!("airlock: failed to parse profile '{}': {e}", path.display());
+                        std::process::exit(1);
+                    }
+                }
+            }
         }
     }
 
-    let _ = std::fs::remove_file(&path);
+    if profile_map.is_empty() {
+        eprintln!(
+            "airlock: no profiles found in {} — create at least one profile to start",
+            prof_dir.display()
+        );
+        std::process::exit(1);
+    }
 
-    let listener = match UnixListener::bind(&path) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("failed to bind socket at {}: {e}", path.display());
-            std::process::exit(1);
+    // Bind sockets
+    let sock_dir = sockets_dir();
+    if let Err(e) = std::fs::create_dir_all(&sock_dir) {
+        eprintln!(
+            "airlock: failed to create sockets directory {}: {e}",
+            sock_dir.display()
+        );
+        std::process::exit(1);
+    }
+
+    let mut listeners: Vec<(String, UnixListener)> = Vec::new();
+    let mut profile_names: Vec<&str> = profile_map.keys().map(|s| s.as_str()).collect();
+    profile_names.sort();
+
+    for name in &profile_names {
+        let sock_path = sock_dir.join(format!("{name}.sock"));
+        let _ = std::fs::remove_file(&sock_path);
+        match UnixListener::bind(&sock_path) {
+            Ok(l) => {
+                listeners.push((name.to_string(), l));
+            }
+            Err(e) => {
+                eprintln!(
+                    "airlock: failed to bind socket at {}: {e}",
+                    sock_path.display()
+                );
+                std::process::exit(1);
+            }
         }
-    };
+    }
 
-    println!("airlock-daemon listening on {}", path.display());
+    eprintln!(
+        "airlock: listening on {} profile socket(s): {}",
+        listeners.len(),
+        profile_names.join(", ")
+    );
+
+    let profiles: ProfileMap = Arc::new(profile_map);
 
     let app_config = Config::load(&config_dir());
     let log_path = config::expand_tilde(&app_config.log.path);
@@ -298,7 +418,8 @@ async fn main() {
     let hook_runner = Arc::new(HookRunner::new(hooks_dir()));
 
     run_daemon(
-        listener,
+        listeners,
+        profiles,
         mount_cache,
         registry,
         cmd_locks,

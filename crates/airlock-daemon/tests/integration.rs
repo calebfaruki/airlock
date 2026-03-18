@@ -1,7 +1,8 @@
 use airlock_daemon::commands::CommandRegistry;
 use airlock_daemon::hooks::HookRunner;
 use airlock_daemon::logging::AuditLogger;
-use airlock_daemon::{run_daemon, ConcurrencyLocks, MountCache};
+use airlock_daemon::profile::Profile;
+use airlock_daemon::{run_daemon, ConcurrencyLocks, MountCache, ProfileMap};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,6 +29,12 @@ fn unique_log_path() -> std::path::PathBuf {
     dir.join("airlock.log")
 }
 
+fn default_profiles() -> ProfileMap {
+    let mut map = HashMap::new();
+    map.insert("default".to_string(), Profile::default());
+    Arc::new(map)
+}
+
 async fn start_daemon(sock_path: &std::path::Path) -> tokio::task::JoinHandle<()> {
     start_daemon_with_hooks(sock_path, &unique_hooks_dir(), &unique_log_path()).await
 }
@@ -37,8 +44,19 @@ async fn start_daemon_with_hooks(
     hooks_dir: &std::path::Path,
     log_path: &std::path::Path,
 ) -> tokio::task::JoinHandle<()> {
+    start_daemon_with_profile(sock_path, hooks_dir, log_path, default_profiles()).await
+}
+
+async fn start_daemon_with_profile(
+    sock_path: &std::path::Path,
+    hooks_dir: &std::path::Path,
+    log_path: &std::path::Path,
+    profiles: ProfileMap,
+) -> tokio::task::JoinHandle<()> {
+    let profile_name = profiles.keys().next().unwrap().clone();
     let _ = std::fs::remove_file(sock_path);
     let listener = tokio::net::UnixListener::bind(sock_path).unwrap();
+    let listeners = vec![(profile_name, listener)];
     let cache: MountCache = Arc::new(RwLock::new(HashMap::new()));
     let mut registry = CommandRegistry::new();
     registry.load_builtins();
@@ -47,7 +65,7 @@ async fn start_daemon_with_hooks(
     let hook_runner = Arc::new(HookRunner::new(hooks_dir.to_path_buf()));
     let logger = Arc::new(AuditLogger::new(log_path.to_path_buf(), 50, 5));
     tokio::spawn(async move {
-        run_daemon(listener, cache, registry, locks, hook_runner, logger).await;
+        run_daemon(listeners, profiles, cache, registry, locks, hook_runner, logger).await;
     })
 }
 
@@ -283,6 +301,38 @@ exit 0
         assert!(
             final_resp.is_some(),
             "modified request should still execute"
+        );
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn profile_rejects_command_not_in_whitelist() {
+        let sock = test_socket_path("profile-deny");
+        let mut map = HashMap::new();
+        map.insert(
+            "restricted".to_string(),
+            Profile::parse(r#"commands = ["git"]"#).unwrap(),
+        );
+        let profiles: ProfileMap = Arc::new(map);
+        let _handle =
+            start_daemon_with_profile(&sock, &unique_hooks_dir(), &unique_log_path(), profiles)
+                .await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"terraform","args":["plan"]}}"#;
+        let lines = send_and_collect(&sock, request).await;
+
+        let resp: AnyResponse = serde_json::from_str(&lines[0]).unwrap();
+        assert!(resp.error.is_some(), "unlisted command should be denied");
+        let message = resp.error.unwrap()["message"].as_str().unwrap().to_string();
+        assert!(
+            message.contains("not permitted by profile"),
+            "error should mention profile, got: {message}"
+        );
+        assert!(
+            message.contains("restricted"),
+            "error should name the profile, got: {message}"
         );
 
         let _ = std::fs::remove_file(&sock);
@@ -533,6 +583,7 @@ mod audit_log {
 
         assert_eq!(entry["outcome"], "allowed");
         assert_eq!(entry["command"], "git");
+        assert_eq!(entry["profile"], "default");
         assert!(entry["exit_code"].is_number());
         assert!(entry["ts"].as_str().unwrap().ends_with('Z'));
         assert!(entry.get("reason").is_none());
@@ -567,4 +618,5 @@ mod audit_log {
 
         let _ = std::fs::remove_file(&sock);
     }
+
 }

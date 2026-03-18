@@ -3,10 +3,12 @@ pub mod config;
 pub mod hooks;
 pub mod init;
 pub mod logging;
+pub mod profile;
 
 use commands::CommandRegistry;
 use hooks::{HookRunner, PostExecResult, PreExecResult};
 use logging::{AuditLogger, LogEntry};
+use profile::Profile;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -81,6 +83,7 @@ pub struct DockerMount {
 
 pub type MountCache = Arc<RwLock<HashMap<String, Vec<DockerMount>>>>;
 pub type ConcurrencyLocks = Arc<RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>;
+pub type ProfileMap = Arc<HashMap<String, Profile>>;
 
 fn is_path_prefix(prefix: &str, path: &str) -> bool {
     if path == prefix {
@@ -221,6 +224,7 @@ async fn resolve_host_cwd(
 fn log_denied(
     logger: &AuditLogger,
     id: u64,
+    profile: &str,
     params: &ExecParams,
     start: std::time::Instant,
     reason: String,
@@ -228,6 +232,7 @@ fn log_denied(
     logger.log(&LogEntry {
         ts: logging::now_utc(),
         id,
+        profile: profile.to_string(),
         event: "exec".to_string(),
         command: params.command.clone(),
         args: params.args.clone(),
@@ -239,8 +244,11 @@ fn log_denied(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_connection(
     stream: tokio::net::UnixStream,
+    profile_name: String,
+    profiles: ProfileMap,
     mount_cache: MountCache,
     registry: Arc<CommandRegistry>,
     cmd_locks: ConcurrencyLocks,
@@ -275,7 +283,7 @@ pub async fn handle_connection(
             writer
                 .write_all(&send_line(&serde_json::to_string(&err)?))
                 .await?;
-            log_denied(&logger, id, &params, start, reason);
+            log_denied(&logger, id, &profile_name, &params, start, reason);
             return Ok(());
         }
     };
@@ -293,7 +301,23 @@ pub async fn handle_connection(
         writer
             .write_all(&send_line(&serde_json::to_string(&err)?))
             .await?;
-        log_denied(&logger, id, &params, start, reason);
+        log_denied(&logger, id, &profile_name, &params, start, reason);
+        return Ok(());
+    }
+
+    let profile = profiles
+        .get(&profile_name)
+        .expect("profile must exist in map");
+    if !profile.allows_command(&params.command) {
+        let reason = format!(
+            "command '{}' not permitted by profile '{}'",
+            params.command, profile_name
+        );
+        let err = build_error_response(id, -32600, reason.clone());
+        writer
+            .write_all(&send_line(&serde_json::to_string(&err)?))
+            .await?;
+        log_denied(&logger, id, &profile_name, &params, start, reason);
         return Ok(());
     }
 
@@ -332,7 +356,7 @@ pub async fn handle_connection(
                     writer
                         .write_all(&send_line(&serde_json::to_string(&err)?))
                         .await?;
-                    log_denied(&logger, new_id, &new_params, start, reason);
+                    log_denied(&logger, new_id, &profile_name, &new_params, start, reason);
                     return Ok(());
                 }
             };
@@ -350,7 +374,7 @@ pub async fn handle_connection(
                 writer
                     .write_all(&send_line(&serde_json::to_string(&err)?))
                     .await?;
-                log_denied(&logger, new_id, &new_params, start, reason);
+                log_denied(&logger, new_id, &profile_name, &new_params, start, reason);
                 return Ok(());
             }
 
@@ -366,6 +390,7 @@ pub async fn handle_connection(
             log_denied(
                 &logger,
                 id,
+                &profile_name,
                 &params,
                 start,
                 "pre-exec hook rejected".to_string(),
@@ -383,7 +408,7 @@ pub async fn handle_connection(
                 writer
                     .write_all(&send_line(&serde_json::to_string(&err)?))
                     .await?;
-                log_denied(&logger, id, &params, start, reason);
+                log_denied(&logger, id, &profile_name, &params, start, reason);
                 return Ok(());
             }
         },
@@ -411,12 +436,22 @@ pub async fn handle_connection(
         cmd.args(&args_section.append);
     }
     cmd.current_dir(&host_cwd);
+    // Three-layer env merge: strip → profile → command hardening
     if let Some(ref env_section) = module.env {
         if let Some(ref strip) = env_section.strip {
             for key in strip {
                 cmd.env_remove(key);
             }
         }
+    }
+    if let Some(ref profile_env) = profile.env {
+        if let Some(ref set) = profile_env.set {
+            for (key, val) in set {
+                cmd.env(key, val);
+            }
+        }
+    }
+    if let Some(ref env_section) = module.env {
         if let Some(ref set) = env_section.set {
             for (key, val) in set {
                 cmd.env(key, val);
@@ -443,7 +478,7 @@ pub async fn handle_connection(
             writer
                 .write_all(&send_line(&serde_json::to_string(&err)?))
                 .await?;
-            log_denied(&logger, id, &params, start, msg);
+            log_denied(&logger, id, &profile_name, &params, start, msg);
             return Ok(());
         }
     };
@@ -609,6 +644,7 @@ pub async fn handle_connection(
     logger.log(&LogEntry {
         ts: logging::now_utc(),
         id,
+        profile: profile_name,
         event: "exec".to_string(),
         command: params.command.clone(),
         args: params.args.clone(),
@@ -623,33 +659,50 @@ pub async fn handle_connection(
 }
 
 pub async fn run_daemon(
-    listener: UnixListener,
+    listeners: Vec<(String, UnixListener)>,
+    profiles: ProfileMap,
     mount_cache: MountCache,
     registry: Arc<CommandRegistry>,
     cmd_locks: ConcurrencyLocks,
     hook_runner: Arc<HookRunner>,
     logger: Arc<AuditLogger>,
 ) {
-    loop {
-        let (stream, _) = match listener.accept().await {
-            Ok(conn) => conn,
-            Err(e) => {
-                eprintln!("accept error: {e}");
-                continue;
-            }
-        };
-
+    for (profile_name, listener) in listeners {
+        let name = profile_name;
+        let profs = profiles.clone();
         let cache = mount_cache.clone();
         let reg = registry.clone();
         let locks = cmd_locks.clone();
         let hooks = hook_runner.clone();
         let log = logger.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, cache, reg, locks, hooks, log).await {
-                eprintln!("connection error: {e}");
+            loop {
+                let (stream, _) = match listener.accept().await {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        eprintln!("accept error: {e}");
+                        continue;
+                    }
+                };
+
+                let n = name.clone();
+                let p = profs.clone();
+                let c = cache.clone();
+                let r = reg.clone();
+                let l = locks.clone();
+                let h = hooks.clone();
+                let lg = log.clone();
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        handle_connection(stream, n, p, c, r, l, h, lg).await
+                    {
+                        eprintln!("connection error: {e}");
+                    }
+                });
             }
         });
     }
+    std::future::pending::<()>().await;
 }
 
 #[cfg(test)]

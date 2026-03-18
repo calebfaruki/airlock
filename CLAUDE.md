@@ -71,17 +71,42 @@ Unknown command:
 
 The shim reads lines from the socket. Notifications get printed immediately to the correct stream. The final response (matched by `id`) triggers exit with the returned exit code.
 
+## Profiles
+
+Profiles scope credentials to individual containers. Each profile gets its own unix socket. The volume mount is the capability — no identity verification needed.
+
+### Profile TOML (`~/.config/airlock/profiles/<name>.toml`)
+
+```toml
+commands = ["git", "gh"]
+
+[env]
+set = { GIT_SSH_COMMAND = "ssh -i ~/.ssh/project_a_key" }
+```
+
+Both fields are optional. An empty file is a valid profile (all commands, no env injection).
+
+### Env Merge Order
+
+1. **Command module `[env] strip`** — removes dangerous vars (always wins)
+2. **Profile `[env] set`** — injects credentials
+3. **Command module `[env] set`** — injects hardening (wins over profile)
+
+### Socket-per-profile
+
+The daemon creates one socket per profile at startup. Mapping: `profiles/<name>.toml` → `sockets/<name>.sock`.
+
 ## Socket Paths
 
 | Location | Path |
 |----------|------|
 | Inside container (hardcoded) | `/run/docker-airlock.sock` |
-| Host — Linux | `/var/run/docker-airlock.sock` |
-| Host — macOS | `~/.config/airlock/docker-airlock.sock` |
+| Host — Linux | `$XDG_RUNTIME_DIR/airlock/sockets/<profile>.sock` |
+| Host — macOS | `~/.config/airlock/sockets/<profile>.sock` |
 
-Docker volume mount:
+Docker volume mount (example profile `agent-a`):
 ```
--v /var/run/docker-airlock.sock:/run/docker-airlock.sock
+-v $XDG_RUNTIME_DIR/airlock/sockets/agent-a.sock:/run/docker-airlock.sock
 ```
 
 ## Container-Side Shim
@@ -225,6 +250,7 @@ Every request is logged (allowed and denied):
 {
   "ts": "2026-03-17T14:32:01Z",
   "id": 1,
+  "profile": "agent-a",
   "event": "exec",
   "command": "git",
   "args": ["push", "origin", "main"],
@@ -240,6 +266,7 @@ Denied request:
 {
   "ts": "2026-03-17T14:32:05Z",
   "id": 2,
+  "profile": "readonly-agent",
   "event": "exec",
   "command": "terraform",
   "args": ["destroy"],
@@ -257,12 +284,12 @@ Structured for SIEM/Splunk ingestion. Airlock does not own export — it writes 
 
 Single command that sets up the host. Idempotent — safe to run multiple times.
 
-1. Creates directory structure: `~/.config/airlock/`, `~/.config/airlock/hooks/`, `~/.config/airlock/commands/`, `~/.local/share/airlock/`
+1. Creates directory structure: `~/.config/airlock/`, `~/.config/airlock/hooks/`, `~/.config/airlock/commands/`, `~/.config/airlock/profiles/`, sockets dir, `~/.local/share/airlock/`
 2. Installs systemd user unit (Linux) or launchd plist (macOS)
 3. Enables and starts the daemon
 4. Prints the Docker volume mount flag for the user to copy
 
-On version upgrade, `airlock init` updates the service definition but never touches user files (hooks, command overrides, config).
+On version upgrade, `airlock init` updates the service definition but never touches user files (hooks, command overrides, profiles, config).
 
 ## Configuration
 
@@ -286,6 +313,12 @@ If no config file exists, the daemon uses built-in defaults. Most users never cr
 ```
 ~/.config/airlock/
 ├── config.toml              # optional, operational settings only
+├── profiles/
+│   ├── default.toml         # required — at least one profile
+│   └── agent-a.toml         # additional profile
+├── sockets/                 # macOS; Linux uses $XDG_RUNTIME_DIR/airlock/sockets/
+│   ├── default.sock         # one socket per profile
+│   └── agent-a.sock
 ├── hooks/
 │   ├── pre-exec             # optional, any executable
 │   └── post-exec            # optional, any executable

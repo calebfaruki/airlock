@@ -7,6 +7,7 @@ use std::path::PathBuf;
 pub struct LogEntry {
     pub ts: String,
     pub id: u64,
+    pub profile: String,
     pub event: String,
     pub command: String,
     pub args: Vec<String>,
@@ -137,7 +138,7 @@ fn days_to_ymd(days_since_epoch: u64) -> (u64, u64, u64) {
 }
 
 #[cfg(test)]
-mod tests {
+mod audit_log {
     use super::*;
 
     #[test]
@@ -159,6 +160,7 @@ mod tests {
         let entry = LogEntry {
             ts: "2026-03-17T00:00:00Z".to_string(),
             id: 1,
+            profile: "default".to_string(),
             event: "exec".to_string(),
             command: "git".to_string(),
             args: vec!["status".to_string()],

@@ -2,7 +2,25 @@
 bin = "git"
 
 [deny]
-args = ["--upload-pack", "-u", "--config", "-c", "--exec-path", "--template"]
+args = [
+    # Flags — override git internals or inject config
+    "--upload-pack",
+    "-u",
+    "--config",
+    "-c",
+    "--exec-path",
+    "--template",
+    "--config-env",
+    "--receive-pack",
+
+    # Subcommands — dangerous plumbing and credential access
+    "credential",
+    "daemon",
+    "shell",
+    "upload-pack",
+    "receive-pack",
+    "upload-archive",
+]
 
 [env]
 strip = ["GIT_SSH_COMMAND", "GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_PARAMETERS", "GIT_ATTR_SOURCE", "GIT_CONFIG_COUNT"]

@@ -235,6 +235,11 @@ pub fn generate_launchd_plist(bin_path: &Path, data_dir: &Path) -> String {
         <key>SuccessfulExit</key>
         <false/>
     </dict>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
     <key>StandardOutPath</key>
     <string>{}/airlock-stdout.log</string>
     <key>StandardErrorPath</key>
@@ -401,6 +406,8 @@ mod tests {
         assert!(content.contains("<key>RunAtLoad</key>"));
         assert!(content.contains("<key>KeepAlive</key>"));
         assert!(content.contains("<key>SuccessfulExit</key>"));
+        assert!(content.contains("<key>EnvironmentVariables</key>"));
+        assert!(content.contains("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"));
         assert!(content.contains("/Users/test/.local/share/airlock/airlock-stdout.log"));
     }
 

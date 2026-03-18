@@ -419,7 +419,7 @@ mod faithful_proxy {
             "post-exec",
             r#"#!/bin/bash
 INPUT=$(cat)
-echo "$INPUT" | sed 's/branch/REDACTED/g'
+echo "$INPUT" | sed 's/commit/REDACTED/g'
 exit 0
 "#,
         );
@@ -449,8 +449,8 @@ exit 0
             "post-exec hook should have modified output, got: {stdout_data}"
         );
         assert!(
-            !stdout_data.contains("branch"),
-            "original 'branch' should have been replaced, got: {stdout_data}"
+            !stdout_data.contains("commit"),
+            "original 'commit' should have been replaced, got: {stdout_data}"
         );
 
         let _ = std::fs::remove_file(&sock);

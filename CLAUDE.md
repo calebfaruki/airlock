@@ -101,12 +101,11 @@ The daemon creates one socket per profile at startup. Mapping: `profiles/<name>.
 | Location | Path |
 |----------|------|
 | Inside container (hardcoded) | `/run/docker-airlock.sock` |
-| Host — Linux | `$XDG_RUNTIME_DIR/airlock/sockets/<profile>.sock` |
-| Host — macOS | `~/.config/airlock/sockets/<profile>.sock` |
+| Host (all platforms) | `~/.config/airlock/sockets/<profile>.sock` |
 
 Docker volume mount (example profile `agent-a`):
 ```
--v $XDG_RUNTIME_DIR/airlock/sockets/agent-a.sock:/run/docker-airlock.sock
+-v ~/.config/airlock/sockets/agent-a.sock:/run/docker-airlock.sock
 ```
 
 ## Container-Side Shim
@@ -316,7 +315,7 @@ If no config file exists, the daemon uses built-in defaults. Most users never cr
 ├── profiles/
 │   ├── default.toml         # required — at least one profile
 │   └── agent-a.toml         # additional profile
-├── sockets/                 # macOS; Linux uses $XDG_RUNTIME_DIR/airlock/sockets/
+├── sockets/                 # one socket per profile, created by daemon
 │   ├── default.sock         # one socket per profile
 │   └── agent-a.sock
 ├── hooks/

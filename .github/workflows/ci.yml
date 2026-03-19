@@ -41,3 +41,15 @@ jobs:
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  codeql:
+    needs: lint
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: github/codeql-action/init@603b797f8b14b413fe025cd935a91c16c4782713 # v3
+        with:
+          languages: actions
+      - uses: github/codeql-action/analyze@603b797f8b14b413fe025cd935a91c16c4782713 # v3

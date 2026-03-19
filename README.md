@@ -75,11 +75,9 @@ EOF
 
 Mount the profile's socket into the container. The shim always connects to `/run/docker-airlock.sock` inside the container.
 
-Linux:
-
 ```sh
 docker run \
-    -v /run/user/$(id -u)/airlock/sockets/agent-a.sock:/run/docker-airlock.sock \
+    -v ~/.config/airlock/sockets/agent-a.sock:/run/docker-airlock.sock \
     your-image
 ```
 
@@ -189,10 +187,9 @@ A profile cannot override security hardening set by a command module.
 
 ### Socket Paths
 
-| Platform | Path |
-|----------|------|
-| macOS | `~/.config/airlock/sockets/<profile>.sock` |
-| Linux | `$XDG_RUNTIME_DIR/airlock/sockets/<profile>.sock` |
+| Path |
+|------|
+| `~/.config/airlock/sockets/<profile>.sock` |
 
 ### No Profiles = No Start
 
@@ -205,8 +202,7 @@ v1 used a single shared socket. v2 requires profiles:
 1. Create at least one profile: `touch ~/.config/airlock/profiles/default.toml`
 2. Re-run `airlock init` to create the new directories
 3. Update `docker run` commands to mount the profile socket:
-   - Linux: `-v /run/user/$(id -u)/airlock/sockets/default.sock:/run/docker-airlock.sock`
-   - macOS: `-v ~/.config/airlock/sockets/default.sock:/run/docker-airlock.sock`
+   `-v ~/.config/airlock/sockets/default.sock:/run/docker-airlock.sock`
 
 ## Security Model
 

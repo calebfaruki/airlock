@@ -21,14 +21,7 @@ fn profiles_dir() -> PathBuf {
 }
 
 fn sockets_dir() -> PathBuf {
-    if cfg!(target_os = "macos") {
-        config_dir().join("sockets")
-    } else {
-        match env::var("XDG_RUNTIME_DIR") {
-            Ok(dir) => PathBuf::from(dir).join("airlock").join("sockets"),
-            Err(_) => config_dir().join("sockets"),
-        }
-    }
+    config_dir().join("sockets")
 }
 
 fn user_commands_dir() -> PathBuf {

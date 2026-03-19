@@ -4,7 +4,7 @@ pub struct InitConfig {
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,
     pub bin_path: PathBuf,
-    pub socket_path: PathBuf,
+    pub sockets_dir: PathBuf,
 }
 
 #[derive(Debug, PartialEq)]
@@ -22,17 +22,11 @@ impl InitConfig {
         let bin_path =
             std::env::current_exe().unwrap_or_else(|_| home.join(".local/bin/airlock-daemon"));
 
-        let socket_path = if cfg!(target_os = "macos") {
-            home.join(".config/airlock/docker-airlock.sock")
-        } else {
-            PathBuf::from("/var/run/docker-airlock.sock")
-        };
-
         Self {
             config_dir: home.join(".config/airlock"),
             data_dir: home.join(".local/share/airlock"),
             bin_path,
-            socket_path,
+            sockets_dir: home.join(".config/airlock/sockets"),
         }
     }
 }
@@ -56,15 +50,15 @@ pub fn run_init(config: &InitConfig) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("airlock:");
-    println!("airlock: Docker volume mount flag:");
-    if cfg!(target_os = "macos") {
-        println!(
-            "airlock:   -v {}:/run/docker-airlock.sock",
-            config.socket_path.display()
-        );
-    } else {
-        println!("airlock:   -v /var/run/docker-airlock.sock:/run/docker-airlock.sock");
-    }
+    println!(
+        "airlock: profile sockets directory: {}",
+        config.sockets_dir.display()
+    );
+    println!("airlock: Docker volume mount (example for profile 'default'):");
+    println!(
+        "airlock:   -v {}/default.sock:/run/docker-airlock.sock",
+        config.sockets_dir.display()
+    );
 
     Ok(())
 }
@@ -76,9 +70,19 @@ pub fn run_uninstall(config: &InitConfig) -> Result<(), Box<dyn std::error::Erro
     remove_service(config)?;
     println!("airlock: removed service file");
 
-    if config.socket_path.exists() {
-        std::fs::remove_file(&config.socket_path)?;
-        println!("airlock: removed socket {}", config.socket_path.display());
+    if config.sockets_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&config.sockets_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("sock") {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+        println!(
+            "airlock: cleaned sockets in {}",
+            config.sockets_dir.display()
+        );
     }
 
     Ok(())
@@ -87,20 +91,11 @@ pub fn run_uninstall(config: &InitConfig) -> Result<(), Box<dyn std::error::Erro
 pub fn create_directories(config: &InitConfig) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let mut created = Vec::new();
 
-    let sockets_dir = if cfg!(target_os = "macos") {
-        config.config_dir.join("sockets")
-    } else {
-        match std::env::var("XDG_RUNTIME_DIR") {
-            Ok(dir) => PathBuf::from(dir).join("airlock").join("sockets"),
-            Err(_) => config.config_dir.join("sockets"),
-        }
-    };
-
     let dirs = [
         config.config_dir.join("hooks"),
         config.config_dir.join("commands"),
         config.config_dir.join("profiles"),
-        sockets_dir,
+        config.sockets_dir.clone(),
         config.data_dir.clone(),
     ];
 
@@ -373,7 +368,7 @@ mod idempotent_setup {
             config_dir: base.join("config/airlock"),
             data_dir: base.join("share/airlock"),
             bin_path: PathBuf::from("/usr/local/bin/airlock-daemon"),
-            socket_path: base.join("airlock.sock"),
+            sockets_dir: base.join("sockets"),
         }
     }
 
@@ -388,7 +383,7 @@ mod idempotent_setup {
         assert!(config.config_dir.join("hooks").is_dir());
         assert!(config.config_dir.join("commands").is_dir());
         assert!(config.config_dir.join("profiles").is_dir());
-        assert!(config.config_dir.join("sockets").is_dir());
+        assert!(config.sockets_dir.is_dir());
         assert!(config.data_dir.is_dir());
 
         // Idempotent: second call creates nothing

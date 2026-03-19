@@ -1,0 +1,33 @@
+[package]
+name = "airlock-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+airlock-daemon = { path = "../crates/airlock-daemon" }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_parse_request"
+path = "fuzz_targets/fuzz_parse_request.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_parse_profile"
+path = "fuzz_targets/fuzz_parse_profile.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_parse_and_deny"
+path = "fuzz_targets/fuzz_parse_and_deny.rs"
+test = false
+doc = false

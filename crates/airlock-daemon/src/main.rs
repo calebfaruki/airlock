@@ -3,7 +3,7 @@ use airlock_daemon::config::{self, Config};
 use airlock_daemon::hooks::HookRunner;
 use airlock_daemon::logging::AuditLogger;
 use airlock_daemon::profile::Profile;
-use airlock_daemon::{run_daemon, ConcurrencyLocks, MountCache, ProfileMap};
+use airlock_daemon::{bind_profile_socket, run_daemon, ConcurrencyLocks, MountCache, ProfileMap};
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
@@ -362,9 +362,9 @@ async fn main() {
 
     for name in &profile_names {
         let sock_path = sock_dir.join(format!("{name}.sock"));
-        let _ = std::fs::remove_file(&sock_path);
-        match UnixListener::bind(&sock_path) {
+        match bind_profile_socket(&sock_path) {
             Ok(l) => {
+                eprintln!("airlock: bound socket {} (mode 0600)", sock_path.display());
                 listeners.push((name.to_string(), l));
             }
             Err(e) => {

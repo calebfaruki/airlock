@@ -2,7 +2,7 @@ use airlock_daemon::commands::CommandRegistry;
 use airlock_daemon::hooks::HookRunner;
 use airlock_daemon::logging::AuditLogger;
 use airlock_daemon::profile::Profile;
-use airlock_daemon::{run_daemon, ConcurrencyLocks, MountCache, ProfileMap};
+use airlock_daemon::{bind_profile_socket, run_daemon, ConcurrencyLocks, MountCache, ProfileMap};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -54,8 +54,7 @@ async fn start_daemon_with_profile(
     profiles: ProfileMap,
 ) -> tokio::task::JoinHandle<()> {
     let profile_name = profiles.keys().next().unwrap().clone();
-    let _ = std::fs::remove_file(sock_path);
-    let listener = tokio::net::UnixListener::bind(sock_path).unwrap();
+    let listener = bind_profile_socket(sock_path).unwrap();
     let listeners = vec![(profile_name, listener)];
     let cache: MountCache = Arc::new(RwLock::new(HashMap::new()));
     let mut registry = CommandRegistry::new();
@@ -376,6 +375,21 @@ exit 0
                 == Some("output")
         });
         assert!(!has_output, "command should not have executed");
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn socket_created_with_restricted_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let sock = test_socket_path("sock-perms");
+        let _handle = start_daemon(&sock).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let meta = std::fs::metadata(&sock).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "socket should be owner-only, got {mode:o}");
 
         let _ = std::fs::remove_file(&sock);
     }

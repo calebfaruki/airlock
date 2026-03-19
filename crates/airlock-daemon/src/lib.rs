@@ -11,6 +11,8 @@ use logging::{AuditLogger, LogEntry};
 use profile::Profile;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
@@ -656,6 +658,13 @@ pub async fn handle_connection(
     });
 
     Ok(())
+}
+
+pub fn bind_profile_socket(path: &Path) -> Result<UnixListener, Box<dyn std::error::Error>> {
+    let _ = std::fs::remove_file(path);
+    let listener = UnixListener::bind(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
 }
 
 pub async fn run_daemon(

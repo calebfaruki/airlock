@@ -53,3 +53,21 @@ jobs:
         with:
           languages: actions
       - uses: github/codeql-action/analyze@603b797f8b14b413fe025cd935a91c16c4782713 # v3
+
+  fuzz:
+    needs: [test, audit]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-fuzz-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          sanitizer: address
+      - uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 120
+          mode: code-change
+          sanitizer: address

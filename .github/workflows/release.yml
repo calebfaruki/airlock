@@ -37,7 +37,7 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} -p airlock-daemon
       - name: Rename artifact
         run: cp target/${{ matrix.target }}/release/airlock-daemon ${{ matrix.artifact }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
@@ -71,7 +71,7 @@ jobs:
           RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target ${{ matrix.target }} -p airlock-shim
       - name: Rename artifact
         run: cp target/${{ matrix.target }}/release/airlock-shim ${{ matrix.artifact }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}

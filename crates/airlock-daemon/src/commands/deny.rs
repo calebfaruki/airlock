@@ -1,4 +1,4 @@
-use globset::Glob;
+use globset::{Glob, GlobMatcher};
 
 #[derive(Debug, PartialEq)]
 pub struct NormalizedArg {
@@ -11,33 +11,40 @@ pub struct NormalizedArg {
 pub enum DenyRule {
     Arg(String),
     Sequence(Vec<DenyRule>),
-    FlagValue { flag: String, pattern: String },
+    FlagValue {
+        flag: String,
+        pattern: String,
+        matcher: GlobMatcher,
+    },
 }
 
 fn is_glob_pattern(s: &str) -> bool {
     s.contains('*') || s.contains('?') || s.contains('[')
 }
 
-pub fn parse_deny_entry(entry: &str) -> DenyRule {
+pub fn parse_deny_entry(entry: &str) -> Result<DenyRule, String> {
     parse_deny_entry_inner(entry, 0)
 }
 
-fn parse_deny_entry_inner(entry: &str, depth: u8) -> DenyRule {
+fn parse_deny_entry_inner(entry: &str, depth: u8) -> Result<DenyRule, String> {
     if depth == 0 && entry.contains(" & ") {
-        DenyRule::Sequence(
-            entry
-                .split(" & ")
-                .map(|e| parse_deny_entry_inner(e, depth + 1))
-                .collect(),
-        )
+        let rules: Result<Vec<DenyRule>, String> = entry
+            .split(" & ")
+            .map(|e| parse_deny_entry_inner(e, depth + 1))
+            .collect();
+        Ok(DenyRule::Sequence(rules?))
     } else if entry.starts_with('-') && entry.contains('=') {
         let (flag, pattern) = entry.split_once('=').unwrap();
-        DenyRule::FlagValue {
+        let matcher = Glob::new(pattern)
+            .map_err(|e| format!("invalid glob in deny entry '{}': {}", entry, e))?
+            .compile_matcher();
+        Ok(DenyRule::FlagValue {
             flag: flag.into(),
             pattern: pattern.into(),
-        }
+            matcher,
+        })
     } else {
-        DenyRule::Arg(entry.into())
+        Ok(DenyRule::Arg(entry.into()))
     }
 }
 
@@ -66,7 +73,11 @@ impl DenyRule {
                     None
                 }
             }
-            DenyRule::FlagValue { flag, pattern } => {
+            DenyRule::FlagValue {
+                flag,
+                pattern,
+                matcher,
+            } => {
                 // Raw string fallback for post-`--` args (literal patterns only)
                 if !is_glob_pattern(pattern) {
                     let raw_form = format!("{flag}={pattern}");
@@ -77,22 +88,18 @@ impl DenyRule {
                     }
                 }
 
-                let glob = match Glob::new(pattern) {
-                    Ok(g) => g.compile_matcher(),
-                    Err(_) => return None,
-                };
                 for (i, n) in normalized.iter().enumerate() {
                     if n.flag.as_deref() != Some(flag) {
                         continue;
                     }
                     if let Some(ref val) = n.value {
-                        if glob.is_match(val) {
+                        if matcher.is_match(val) {
                             return Some(format!("{flag}={pattern}"));
                         }
                     }
                     if n.value.is_none() {
                         if let Some(next) = normalized.get(i + 1) {
-                            if glob.is_match(&next.raw) {
+                            if matcher.is_match(&next.raw) {
                                 return Some(format!("{flag}={pattern}"));
                             }
                         }
@@ -106,7 +113,7 @@ impl DenyRule {
     fn entry_text(&self) -> String {
         match self {
             DenyRule::Arg(s) => s.clone(),
-            DenyRule::FlagValue { flag, pattern } => format!("{flag}={pattern}"),
+            DenyRule::FlagValue { flag, pattern, .. } => format!("{flag}={pattern}"),
             DenyRule::Sequence(rules) => rules
                 .iter()
                 .map(|r| r.entry_text())
@@ -348,6 +355,10 @@ mod tests {
         assert_eq!(n.value, Some("🎉".into()));
     }
 
+    fn flag_value(flag: &str, pattern: &str) -> DenyRule {
+        parse_deny_entry(&format!("{flag}={pattern}")).unwrap()
+    }
+
     // --- End-of-options (--) tests ---
 
     #[test]
@@ -362,7 +373,7 @@ mod tests {
 
     #[test]
     fn parse_entry_plain_arg() {
-        match parse_deny_entry("destroy") {
+        match parse_deny_entry("destroy").unwrap() {
             DenyRule::Arg(s) => assert_eq!(s, "destroy"),
             other => panic!("expected Arg, got {:?}", other),
         }
@@ -370,8 +381,8 @@ mod tests {
 
     #[test]
     fn parse_entry_flag_value_long() {
-        match parse_deny_entry("--pid=host") {
-            DenyRule::FlagValue { flag, pattern } => {
+        match parse_deny_entry("--pid=host").unwrap() {
+            DenyRule::FlagValue { flag, pattern, .. } => {
                 assert_eq!(flag, "--pid");
                 assert_eq!(pattern, "host");
             }
@@ -381,8 +392,8 @@ mod tests {
 
     #[test]
     fn parse_entry_flag_value_short() {
-        match parse_deny_entry("-v=/*:*") {
-            DenyRule::FlagValue { flag, pattern } => {
+        match parse_deny_entry("-v=/*:*").unwrap() {
+            DenyRule::FlagValue { flag, pattern, .. } => {
                 assert_eq!(flag, "-v");
                 assert_eq!(pattern, "/*:*");
             }
@@ -392,7 +403,7 @@ mod tests {
 
     #[test]
     fn parse_entry_sequence() {
-        match parse_deny_entry("apply & -auto-approve") {
+        match parse_deny_entry("apply & -auto-approve").unwrap() {
             DenyRule::Sequence(rules) => {
                 assert_eq!(rules.len(), 2);
                 assert!(matches!(&rules[0], DenyRule::Arg(s) if s == "apply"));
@@ -404,7 +415,7 @@ mod tests {
 
     #[test]
     fn parse_entry_positional_with_equals() {
-        match parse_deny_entry("not-a-flag=value") {
+        match parse_deny_entry("not-a-flag=value").unwrap() {
             DenyRule::Arg(s) => assert_eq!(s, "not-a-flag=value"),
             other => panic!("expected Arg, got {:?}", other),
         }
@@ -412,12 +423,14 @@ mod tests {
 
     #[test]
     fn parse_entry_sequence_with_flag_value() {
-        match parse_deny_entry("run & -v=/*:*") {
+        match parse_deny_entry("run & -v=/*:*").unwrap() {
             DenyRule::Sequence(rules) => {
                 assert_eq!(rules.len(), 2);
                 assert!(matches!(&rules[0], DenyRule::Arg(s) if s == "run"));
-                assert!(matches!(&rules[1], DenyRule::FlagValue { flag, pattern }
-                    if flag == "-v" && pattern == "/*:*"));
+                assert!(
+                    matches!(&rules[1], DenyRule::FlagValue { flag, pattern, .. }
+                    if flag == "-v" && pattern == "/*:*")
+                );
             }
             other => panic!("expected Sequence, got {:?}", other),
         }
@@ -426,7 +439,7 @@ mod tests {
     #[test]
     fn parse_entry_sequence_depth_capped() {
         // Nested " & " inside a sequence element is treated as literal
-        match parse_deny_entry("a & b & c") {
+        match parse_deny_entry("a & b & c").unwrap() {
             DenyRule::Sequence(rules) => {
                 assert_eq!(rules.len(), 3);
                 assert!(matches!(&rules[0], DenyRule::Arg(s) if s == "a"));
@@ -435,6 +448,23 @@ mod tests {
             }
             other => panic!("expected Sequence, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn parse_entry_invalid_glob() {
+        assert!(parse_deny_entry("-v=/*[:*").is_err());
+    }
+
+    #[test]
+    fn invalid_glob_in_module_fails_parse() {
+        let toml_str = r#"
+[command]
+bin = "docker"
+
+[deny]
+args = ["-v=/*[:*"]
+"#;
+        assert!(crate::commands::CommandModule::parse(toml_str).is_err());
     }
 
     // --- Arg rule tests ---
@@ -495,49 +525,49 @@ mod tests {
 
     #[test]
     fn sequence_all_present() {
-        let rule = parse_deny_entry("apply & -auto-approve");
+        let rule = parse_deny_entry("apply & -auto-approve").unwrap();
         let normalized = normalize_args(&args(&["apply", "-auto-approve"]));
         assert!(rule.matches(&normalized).is_some());
     }
 
     #[test]
     fn sequence_one_missing() {
-        let rule = parse_deny_entry("apply & -auto-approve");
+        let rule = parse_deny_entry("apply & -auto-approve").unwrap();
         let normalized = normalize_args(&args(&["apply"]));
         assert!(rule.matches(&normalized).is_none());
     }
 
     #[test]
     fn sequence_order_independent() {
-        let rule = parse_deny_entry("apply & -auto-approve");
+        let rule = parse_deny_entry("apply & -auto-approve").unwrap();
         let normalized = normalize_args(&args(&["-auto-approve", "apply"]));
         assert!(rule.matches(&normalized).is_some());
     }
 
     #[test]
     fn sequence_with_extra_args() {
-        let rule = parse_deny_entry("apply & -auto-approve");
+        let rule = parse_deny_entry("apply & -auto-approve").unwrap();
         let normalized = normalize_args(&args(&["plan", "apply", "-auto-approve", "-input=false"]));
         assert!(rule.matches(&normalized).is_some());
     }
 
     #[test]
     fn sequence_with_flag_value_element() {
-        let rule = parse_deny_entry("run & -v=/*:*");
+        let rule = parse_deny_entry("run & -v=/*:*").unwrap();
         let normalized = normalize_args(&args(&["run", "-v", "/:/host"]));
         assert!(rule.matches(&normalized).is_some());
     }
 
     #[test]
     fn sequence_with_flag_value_no_match() {
-        let rule = parse_deny_entry("run & -v=/*:*");
+        let rule = parse_deny_entry("run & -v=/*:*").unwrap();
         let normalized = normalize_args(&args(&["run", "-v", "mydata:/data"]));
         assert!(rule.matches(&normalized).is_none());
     }
 
     #[test]
     fn sequence_with_flag_value_missing_positional() {
-        let rule = parse_deny_entry("run & -v=/*:*");
+        let rule = parse_deny_entry("run & -v=/*:*").unwrap();
         let normalized = normalize_args(&args(&["-v", "/:/host"]));
         assert!(rule.matches(&normalized).is_none());
     }
@@ -546,80 +576,56 @@ mod tests {
 
     #[test]
     fn flag_value_attached_short() {
-        let rule = DenyRule::FlagValue {
-            flag: "-v".into(),
-            pattern: "/*:*".into(),
-        };
+        let rule = flag_value("-v", "/*:*");
         let normalized = normalize_args(&args(&["run", "-v/:/host", "alpine"]));
         assert!(rule.matches(&normalized).is_some());
     }
 
     #[test]
     fn flag_value_detached() {
-        let rule = DenyRule::FlagValue {
-            flag: "-v".into(),
-            pattern: "/*:*".into(),
-        };
+        let rule = flag_value("-v", "/*:*");
         let normalized = normalize_args(&args(&["run", "-v", "/:/host", "alpine"]));
         assert!(rule.matches(&normalized).is_some());
     }
 
     #[test]
     fn flag_value_long_with_equals() {
-        let rule = DenyRule::FlagValue {
-            flag: "--volume".into(),
-            pattern: "/*:*".into(),
-        };
+        let rule = flag_value("--volume", "/*:*");
         let normalized = normalize_args(&args(&["run", "--volume=/etc:/mnt", "alpine"]));
         assert!(rule.matches(&normalized).is_some());
     }
 
     #[test]
     fn flag_value_pattern_no_match() {
-        let rule = DenyRule::FlagValue {
-            flag: "-v".into(),
-            pattern: "/*:*".into(),
-        };
+        let rule = flag_value("-v", "/*:*");
         let normalized = normalize_args(&args(&["run", "-v", "mydata:/data", "alpine"]));
         assert!(rule.matches(&normalized).is_none());
     }
 
     #[test]
     fn flag_value_no_value_present() {
-        let rule = DenyRule::FlagValue {
-            flag: "-v".into(),
-            pattern: "/*:*".into(),
-        };
+        let rule = flag_value("-v", "/*:*");
         let normalized = normalize_args(&args(&["run", "-v"]));
         assert!(rule.matches(&normalized).is_none());
     }
 
     #[test]
     fn flag_value_wrong_flag() {
-        let rule = DenyRule::FlagValue {
-            flag: "-v".into(),
-            pattern: "/*:*".into(),
-        };
+        let rule = flag_value("-v", "/*:*");
         let normalized = normalize_args(&args(&["run", "-p", "/:/host"]));
         assert!(rule.matches(&normalized).is_none());
     }
 
     #[test]
     fn flag_value_raw_fallback_after_double_dash() {
-        let rule = DenyRule::FlagValue {
-            flag: "--pid".into(),
-            pattern: "host".into(),
-        };
+        let rule = flag_value("--pid", "host");
         let normalized = normalize_args(&args(&["--", "run", "--pid=host", "alpine"]));
         assert!(rule.matches(&normalized).is_some());
     }
 
     #[test]
     fn flag_value_raw_fallback_no_false_positive() {
-        let rule = DenyRule::FlagValue {
-            flag: "--pid".into(),
-            pattern: "evil".into(),
-        };
+        let rule = flag_value("--pid", "evil");
         let normalized = normalize_args(&args(&["--", "run", "--pid=host", "alpine"]));
         assert!(rule.matches(&normalized).is_none());
     }
@@ -627,10 +633,7 @@ mod tests {
     #[test]
     fn flag_value_glob_skips_raw_fallback() {
         // Glob patterns should NOT match via raw fallback after --
-        let rule = DenyRule::FlagValue {
-            flag: "-v".into(),
-            pattern: "/*:*".into(),
-        };
+        let rule = flag_value("-v", "/*:*");
         let normalized = normalize_args(&args(&["--", "-v=/*:*"]));
         assert!(rule.matches(&normalized).is_none());
     }
@@ -646,17 +649,14 @@ mod tests {
 
     #[test]
     fn flag_value_match_returns_entry_text() {
-        let rule = DenyRule::FlagValue {
-            flag: "--pid".into(),
-            pattern: "host".into(),
-        };
+        let rule = flag_value("--pid", "host");
         let normalized = normalize_args(&args(&["--pid=host"]));
         assert_eq!(rule.matches(&normalized).unwrap(), "--pid=host");
     }
 
     #[test]
     fn sequence_match_returns_entry_text() {
-        let rule = parse_deny_entry("apply & -auto-approve");
+        let rule = parse_deny_entry("apply & -auto-approve").unwrap();
         let normalized = normalize_args(&args(&["apply", "-auto-approve"]));
         assert_eq!(rule.matches(&normalized).unwrap(), "apply & -auto-approve");
     }
@@ -725,16 +725,22 @@ mod tests {
         }
 
         #[test]
-        fn parse_entry_classification(entry in "[a-z\\-=&/ *?]{1,20}") {
+        fn parse_entry_classification(entry in "[a-z\\-=&/ ]{1,20}") {
             let rule = parse_deny_entry(&entry);
             if entry.contains(" & ") {
-                prop_assert!(matches!(rule, DenyRule::Sequence(_)),
-                    "entry with ' & ' should be Sequence");
+                // Sequence elements with invalid globs produce Err
+                if let Ok(r) = &rule {
+                    prop_assert!(matches!(r, DenyRule::Sequence(_)),
+                        "entry with ' & ' should be Sequence");
+                }
             } else if entry.starts_with('-') && entry.contains('=') {
-                let is_fv = matches!(rule, DenyRule::FlagValue { .. });
+                // All patterns without glob chars are valid
+                let r = rule.unwrap();
+                let is_fv = matches!(r, DenyRule::FlagValue { .. });
                 prop_assert!(is_fv, "entry starting with - containing = should be FlagValue");
             } else {
-                prop_assert!(matches!(rule, DenyRule::Arg(_)),
+                let r = rule.unwrap();
+                prop_assert!(matches!(r, DenyRule::Arg(_)),
                     "other entries should be Arg");
             }
         }

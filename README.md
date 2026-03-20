@@ -2,6 +2,7 @@
 
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/calebfaruki/airlock/badge)](https://securityscorecards.dev/viewer/?uri=github.com/calebfaruki/airlock)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/12214/badge)](https://www.bestpractices.dev/projects/12214)
+[![made-with-rust](https://img.shields.io/badge/Made%20with-Rust-1f425f.svg)](https://www.rust-lang.org/)
 
 Credential isolation for CLI tools in Docker containers. Proxies git, aws, terraform, and other commands that need SSH keys, cloud configs, or local credentials  without mounting secrets into the container.
 

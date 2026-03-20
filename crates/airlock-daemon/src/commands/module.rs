@@ -50,11 +50,14 @@ impl CommandModule {
     pub fn parse(toml_str: &str) -> Result<Self, String> {
         let mut module: Self =
             toml::from_str(toml_str).map_err(|e| format!("failed to parse command module: {e}"))?;
-        module.deny_rules = module
-            .deny
-            .as_ref()
-            .map(|d| d.args.iter().map(|a| parse_deny_entry(a)).collect())
-            .unwrap_or_default();
+        module.deny_rules = match &module.deny {
+            Some(d) => d
+                .args
+                .iter()
+                .map(|a| parse_deny_entry(a))
+                .collect::<Result<Vec<_>, _>>()?,
+            None => Vec::new(),
+        };
         Ok(module)
     }
 

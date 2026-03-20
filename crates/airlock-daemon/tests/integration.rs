@@ -109,6 +109,31 @@ struct AnyResponse {
     params: Option<serde_json::Value>,
 }
 
+fn assert_error_contains(lines: &[String], expected: &str) {
+    let resp: AnyResponse = serde_json::from_str(&lines[0]).unwrap();
+    assert!(resp.error.is_some(), "expected error response");
+    let message = resp.error.unwrap()["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        message.contains(expected),
+        "expected '{}' in: {}",
+        expected,
+        message
+    );
+}
+
+fn assert_success(lines: &[String]) {
+    let found = lines.iter().any(|l| {
+        serde_json::from_str::<AnyResponse>(l)
+            .ok()
+            .map(|r| r.result.is_some())
+            .unwrap_or(false)
+    });
+    assert!(found, "expected success response");
+}
+
 fn write_hook(hooks_dir: &std::path::Path, name: &str, script: &str) {
     let path = hooks_dir.join(name);
     std::fs::write(&path, script).unwrap();
@@ -147,18 +172,7 @@ mod trust_boundary {
 
         let request = r#"{"jsonrpc":"2.0","id":3,"method":"exec","params":{"command":"git","args":["status"]}}"#;
         let lines = send_and_collect(&sock, request).await;
-        let final_resp = lines.iter().find_map(|l| {
-            let r: AnyResponse = serde_json::from_str(l).ok()?;
-            if r.result.is_some() {
-                Some(r)
-            } else {
-                None
-            }
-        });
-        assert!(
-            final_resp.is_some(),
-            "git should be accepted and produce a result"
-        );
+        assert_success(&lines);
 
         let _ = std::fs::remove_file(&sock);
     }
@@ -226,18 +240,7 @@ mod trust_boundary {
         let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"git","args":["status"]}}"#;
         let lines = send_and_collect(&sock, request).await;
 
-        let final_resp = lines.iter().find_map(|l| {
-            let r: AnyResponse = serde_json::from_str(l).ok()?;
-            if r.result.is_some() {
-                Some(r)
-            } else {
-                None
-            }
-        });
-        assert!(
-            final_resp.is_some(),
-            "allowed args should produce a result, not a denial"
-        );
+        assert_success(&lines);
 
         let _ = std::fs::remove_file(&sock);
     }
@@ -251,17 +254,8 @@ mod trust_boundary {
         let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"git","args":["--config=evil","status"]}}"#;
         let lines = send_and_collect(&sock, request).await;
 
-        let resp: AnyResponse = serde_json::from_str(&lines[0]).unwrap();
-        assert!(resp.error.is_some(), "flag=value should be denied");
-        let message = resp.error.unwrap()["message"].as_str().unwrap().to_string();
-        assert!(
-            message.contains("denied"),
-            "error should say 'denied', got: {message}"
-        );
-        assert!(
-            message.contains("--config"),
-            "error should name the flag, got: {message}"
-        );
+        assert_error_contains(&lines, "denied");
+        assert_error_contains(&lines, "--config");
 
         let _ = std::fs::remove_file(&sock);
     }
@@ -275,20 +269,8 @@ mod trust_boundary {
         let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"git","args":["-cevil","status"]}}"#;
         let lines = send_and_collect(&sock, request).await;
 
-        let resp: AnyResponse = serde_json::from_str(&lines[0]).unwrap();
-        assert!(
-            resp.error.is_some(),
-            "short flag with attached value should be denied"
-        );
-        let message = resp.error.unwrap()["message"].as_str().unwrap().to_string();
-        assert!(
-            message.contains("denied"),
-            "error should say 'denied', got: {message}"
-        );
-        assert!(
-            message.contains("-c"),
-            "error should name the flag, got: {message}"
-        );
+        assert_error_contains(&lines, "denied");
+        assert_error_contains(&lines, "-c");
 
         let _ = std::fs::remove_file(&sock);
     }
@@ -302,13 +284,7 @@ mod trust_boundary {
         let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"docker","args":["run","-v","/:/host","alpine"]}}"#;
         let lines = send_and_collect(&sock, request).await;
 
-        let resp: AnyResponse = serde_json::from_str(&lines[0]).unwrap();
-        assert!(resp.error.is_some(), "root volume mount should be denied");
-        let message = resp.error.unwrap()["message"].as_str().unwrap().to_string();
-        assert!(
-            message.contains("denied"),
-            "error should say 'denied', got: {message}"
-        );
+        assert_error_contains(&lines, "denied");
 
         let _ = std::fs::remove_file(&sock);
     }
@@ -322,13 +298,7 @@ mod trust_boundary {
         let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"docker","args":["run","--pid","host","alpine"]}}"#;
         let lines = send_and_collect(&sock, request).await;
 
-        let resp: AnyResponse = serde_json::from_str(&lines[0]).unwrap();
-        assert!(resp.error.is_some(), "--pid host (split) should be denied");
-        let message = resp.error.unwrap()["message"].as_str().unwrap().to_string();
-        assert!(
-            message.contains("denied"),
-            "error should say 'denied', got: {message}"
-        );
+        assert_error_contains(&lines, "denied");
 
         let _ = std::fs::remove_file(&sock);
     }
@@ -342,13 +312,7 @@ mod trust_boundary {
         let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"docker","args":["run","--pid=host","alpine"]}}"#;
         let lines = send_and_collect(&sock, request).await;
 
-        let resp: AnyResponse = serde_json::from_str(&lines[0]).unwrap();
-        assert!(resp.error.is_some(), "--pid=host (joined) should be denied");
-        let message = resp.error.unwrap()["message"].as_str().unwrap().to_string();
-        assert!(
-            message.contains("denied"),
-            "error should say 'denied', got: {message}"
-        );
+        assert_error_contains(&lines, "denied");
 
         let _ = std::fs::remove_file(&sock);
     }
@@ -362,16 +326,7 @@ mod trust_boundary {
         let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"terraform","args":["apply","-auto-approve"]}}"#;
         let lines = send_and_collect(&sock, request).await;
 
-        let resp: AnyResponse = serde_json::from_str(&lines[0]).unwrap();
-        assert!(
-            resp.error.is_some(),
-            "terraform apply -auto-approve should be denied"
-        );
-        let message = resp.error.unwrap()["message"].as_str().unwrap().to_string();
-        assert!(
-            message.contains("denied"),
-            "error should say 'denied', got: {message}"
-        );
+        assert_error_contains(&lines, "denied");
 
         let _ = std::fs::remove_file(&sock);
     }
@@ -411,18 +366,7 @@ mod trust_boundary {
         let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"docker","args":["run","-v","mydata:/data","alpine"]}}"#;
         let lines = send_and_collect(&sock, request).await;
 
-        let final_resp = lines.iter().find_map(|l| {
-            let r: AnyResponse = serde_json::from_str(l).ok()?;
-            if r.result.is_some() {
-                Some(r)
-            } else {
-                None
-            }
-        });
-        assert!(
-            final_resp.is_some(),
-            "docker named volume should be allowed"
-        );
+        assert_success(&lines);
 
         let _ = std::fs::remove_file(&sock);
     }
@@ -443,16 +387,7 @@ mod trust_boundary {
         let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"git","args":["status"]}}"#;
         let lines = send_and_collect(&sock, request).await;
 
-        let resp: AnyResponse = serde_json::from_str(&lines[0]).unwrap();
-        assert!(
-            resp.error.is_some(),
-            "pre-exec rejection should produce error"
-        );
-        let message = resp.error.unwrap()["message"].as_str().unwrap().to_string();
-        assert!(
-            message.contains("not today"),
-            "error should contain hook message, got: {message}"
-        );
+        assert_error_contains(&lines, "not today");
 
         // No output notifications should exist (command never ran)
         let has_output = lines.iter().any(|l| {
@@ -489,18 +424,7 @@ exit 0
         let lines = send_and_collect(&sock, request).await;
 
         // Should succeed (git status --short is valid)
-        let final_resp = lines.iter().find_map(|l| {
-            let r: AnyResponse = serde_json::from_str(l).ok()?;
-            if r.result.is_some() {
-                Some(r)
-            } else {
-                None
-            }
-        });
-        assert!(
-            final_resp.is_some(),
-            "modified request should still execute"
-        );
+        assert_success(&lines);
 
         let _ = std::fs::remove_file(&sock);
     }
@@ -522,17 +446,8 @@ exit 0
         let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"terraform","args":["plan"]}}"#;
         let lines = send_and_collect(&sock, request).await;
 
-        let resp: AnyResponse = serde_json::from_str(&lines[0]).unwrap();
-        assert!(resp.error.is_some(), "unlisted command should be denied");
-        let message = resp.error.unwrap()["message"].as_str().unwrap().to_string();
-        assert!(
-            message.contains("not permitted by profile"),
-            "error should mention profile, got: {message}"
-        );
-        assert!(
-            message.contains("restricted"),
-            "error should name the profile, got: {message}"
-        );
+        assert_error_contains(&lines, "not permitted by profile");
+        assert_error_contains(&lines, "restricted");
 
         let _ = std::fs::remove_file(&sock);
     }
@@ -733,18 +648,7 @@ exit 0
         let lines = send_and_collect(&sock, request).await;
 
         // Should still get a result (hook failure = passthrough)
-        let final_resp = lines.iter().find_map(|l| {
-            let r: AnyResponse = serde_json::from_str(l).ok()?;
-            if r.result.is_some() {
-                Some(r)
-            } else {
-                None
-            }
-        });
-        assert!(
-            final_resp.is_some(),
-            "hook failure should not block the response"
-        );
+        assert_success(&lines);
 
         let _ = std::fs::remove_file(&sock);
     }
@@ -761,15 +665,7 @@ exit 0
         let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"git","args":["status"]}}"#;
         let lines = send_and_collect(&sock, request).await;
 
-        let final_resp = lines.iter().find_map(|l| {
-            let r: AnyResponse = serde_json::from_str(l).ok()?;
-            if r.result.is_some() {
-                Some(r)
-            } else {
-                None
-            }
-        });
-        assert!(final_resp.is_some(), "no hooks should not break execution");
+        assert_success(&lines);
 
         let _ = std::fs::remove_file(&sock);
     }

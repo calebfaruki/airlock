@@ -29,11 +29,7 @@ fn user_commands_dir() -> PathBuf {
 }
 
 fn hooks_dir() -> PathBuf {
-    let home = env::var("HOME").expect("HOME not set");
-    PathBuf::from(home)
-        .join(".config")
-        .join("airlock")
-        .join("hooks")
+    config_dir().join("hooks")
 }
 
 fn load_registry() -> CommandRegistry {

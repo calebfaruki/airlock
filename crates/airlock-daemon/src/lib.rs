@@ -247,6 +247,59 @@ fn log_denied(
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn deny_request(
+    writer: &mut (impl AsyncWriteExt + Unpin),
+    logger: &AuditLogger,
+    id: u64,
+    profile_name: &str,
+    params: &ExecParams,
+    start: std::time::Instant,
+    code: i32,
+    reason: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let err = build_error_response(id, code, reason.clone());
+    writer
+        .write_all(&send_line(&serde_json::to_string(&err)?))
+        .await?;
+    log_denied(logger, id, profile_name, params, start, reason);
+    Ok(())
+}
+
+fn spawn_stream_forwarder(
+    stream: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+    stream_name: &'static str,
+    writer: Arc<tokio::sync::Mutex<impl AsyncWriteExt + Unpin + Send + 'static>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(stream);
+        let mut buf = Vec::with_capacity(4096);
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf).await {
+                Ok(0) => break,
+                Ok(_) => {
+                    let data = String::from_utf8_lossy(&buf).to_string();
+                    let notif = Notification {
+                        jsonrpc: "2.0",
+                        method: "output",
+                        params: OutputParams {
+                            stream: stream_name,
+                            data,
+                        },
+                    };
+                    if let Ok(json) = serde_json::to_string(&notif) {
+                        let mut w = writer.lock().await;
+                        let _ = w.write_all(&send_line(&json)).await;
+                        let _ = w.flush().await;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_connection(
     stream: tokio::net::UnixStream,
     profile_name: String,
@@ -281,29 +334,14 @@ pub async fn handle_connection(
         Some(m) => m,
         None => {
             let reason = format!("unknown command: {}", params.command);
-            let err = build_error_response(id, -32601, reason.clone());
-            writer
-                .write_all(&send_line(&serde_json::to_string(&err)?))
-                .await?;
-            log_denied(&logger, id, &profile_name, &params, start, reason);
+            deny_request(&mut writer, &logger, id, &profile_name, &params, start, -32601, reason).await?;
             return Ok(());
         }
     };
 
     if let Some(denied) = module.check_deny(&params.args) {
-        let reason = format!("denied: '{}' not permitted", denied);
-        let err = build_error_response(
-            id,
-            -32600,
-            format!(
-                "denied: '{}' not permitted for '{}'",
-                denied, params.command
-            ),
-        );
-        writer
-            .write_all(&send_line(&serde_json::to_string(&err)?))
-            .await?;
-        log_denied(&logger, id, &profile_name, &params, start, reason);
+        let reason = format!("denied: '{}' not permitted for '{}'", denied, params.command);
+        deny_request(&mut writer, &logger, id, &profile_name, &params, start, -32600, reason).await?;
         return Ok(());
     }
 
@@ -311,15 +349,8 @@ pub async fn handle_connection(
         .get(&profile_name)
         .expect("profile must exist in map");
     if !profile.allows_command(&params.command) {
-        let reason = format!(
-            "command '{}' not permitted by profile '{}'",
-            params.command, profile_name
-        );
-        let err = build_error_response(id, -32600, reason.clone());
-        writer
-            .write_all(&send_line(&serde_json::to_string(&err)?))
-            .await?;
-        log_denied(&logger, id, &profile_name, &params, start, reason);
+        let reason = format!("command '{}' not permitted by profile '{}'", params.command, profile_name);
+        deny_request(&mut writer, &logger, id, &profile_name, &params, start, -32600, reason).await?;
         return Ok(());
     }
 
@@ -354,29 +385,14 @@ pub async fn handle_connection(
                 Some(m) => m,
                 None => {
                     let reason = format!("unknown command: {}", new_params.command);
-                    let err = build_error_response(new_id, -32601, reason.clone());
-                    writer
-                        .write_all(&send_line(&serde_json::to_string(&err)?))
-                        .await?;
-                    log_denied(&logger, new_id, &profile_name, &new_params, start, reason);
+                    deny_request(&mut writer, &logger, new_id, &profile_name, &new_params, start, -32601, reason).await?;
                     return Ok(());
                 }
             };
 
             if let Some(denied) = new_module.check_deny(&new_params.args) {
-                let reason = format!("denied: '{}' not permitted", denied);
-                let err = build_error_response(
-                    new_id,
-                    -32600,
-                    format!(
-                        "denied: '{}' not permitted for '{}'",
-                        denied, new_params.command
-                    ),
-                );
-                writer
-                    .write_all(&send_line(&serde_json::to_string(&err)?))
-                    .await?;
-                log_denied(&logger, new_id, &profile_name, &new_params, start, reason);
+                let reason = format!("denied: '{}' not permitted for '{}'", denied, new_params.command);
+                deny_request(&mut writer, &logger, new_id, &profile_name, &new_params, start, -32600, reason).await?;
                 return Ok(());
             }
 
@@ -385,18 +401,7 @@ pub async fn handle_connection(
             module = new_module;
         }
         PreExecResult::Rejected(msg) => {
-            let err = build_error_response(id, -32600, msg.clone());
-            writer
-                .write_all(&send_line(&serde_json::to_string(&err)?))
-                .await?;
-            log_denied(
-                &logger,
-                id,
-                &profile_name,
-                &params,
-                start,
-                "pre-exec hook rejected".to_string(),
-            );
+            deny_request(&mut writer, &logger, id, &profile_name, &params, start, -32600, msg).await?;
             return Ok(());
         }
     }
@@ -406,11 +411,7 @@ pub async fn handle_connection(
             Some(path) => path,
             None => {
                 let reason = format!("cwd translation failed: docker inspect failed for container {cid} — is docker in the daemon's PATH?");
-                let err = build_error_response(id, -32603, reason.clone());
-                writer
-                    .write_all(&send_line(&serde_json::to_string(&err)?))
-                    .await?;
-                log_denied(&logger, id, &profile_name, &params, start, reason);
+                deny_request(&mut writer, &logger, id, &profile_name, &params, start, -32603, reason).await?;
                 return Ok(());
             }
         },
@@ -574,63 +575,8 @@ pub async fn handle_connection(
         let stderr = child.stderr.take().unwrap();
         let writer = Arc::new(tokio::sync::Mutex::new(writer));
 
-        let stdout_writer = writer.clone();
-        let stdout_task = tokio::spawn(async move {
-            let mut reader = BufReader::new(stdout);
-            let mut buf = Vec::with_capacity(4096);
-            loop {
-                buf.clear();
-                match reader.read_until(b'\n', &mut buf).await {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        let data = String::from_utf8_lossy(&buf).to_string();
-                        let notif = Notification {
-                            jsonrpc: "2.0",
-                            method: "output",
-                            params: OutputParams {
-                                stream: "stdout",
-                                data,
-                            },
-                        };
-                        if let Ok(json) = serde_json::to_string(&notif) {
-                            let mut w = stdout_writer.lock().await;
-                            let _ = w.write_all(&send_line(&json)).await;
-                            let _ = w.flush().await;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        let stderr_writer = writer.clone();
-        let stderr_task = tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr);
-            let mut buf = Vec::with_capacity(4096);
-            loop {
-                buf.clear();
-                match reader.read_until(b'\n', &mut buf).await {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        let data = String::from_utf8_lossy(&buf).to_string();
-                        let notif = Notification {
-                            jsonrpc: "2.0",
-                            method: "output",
-                            params: OutputParams {
-                                stream: "stderr",
-                                data,
-                            },
-                        };
-                        if let Ok(json) = serde_json::to_string(&notif) {
-                            let mut w = stderr_writer.lock().await;
-                            let _ = w.write_all(&send_line(&json)).await;
-                            let _ = w.flush().await;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
+        let stdout_task = spawn_stream_forwarder(stdout, "stdout", writer.clone());
+        let stderr_task = spawn_stream_forwarder(stderr, "stderr", writer.clone());
 
         let _ = tokio::join!(stdout_task, stderr_task);
         let status = child.wait().await?;

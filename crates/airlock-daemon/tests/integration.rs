@@ -4,7 +4,7 @@ use airlock_daemon::logging::AuditLogger;
 use airlock_daemon::profile::Profile;
 use airlock_daemon::{bind_profile_socket, run_daemon, ConcurrencyLocks, MountCache, ProfileMap};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -69,6 +69,33 @@ async fn start_daemon_with_profile(
     let locks: ConcurrencyLocks = Arc::new(RwLock::new(HashMap::new()));
     let hook_runner = Arc::new(HookRunner::new(hooks_dir.to_path_buf()));
     let logger = Arc::new(AuditLogger::new(log_path.to_path_buf(), 50, 5));
+    tokio::spawn(async move {
+        run_daemon(
+            listeners,
+            profiles,
+            cache,
+            registry,
+            locks,
+            hook_runner,
+            logger,
+        )
+        .await;
+    })
+}
+
+async fn start_daemon_with_registry(
+    sock_path: &std::path::Path,
+    registry: CommandRegistry,
+) -> tokio::task::JoinHandle<()> {
+    let profiles = default_profiles();
+    let profile_name = profiles.keys().next().unwrap().clone();
+    let listener = bind_profile_socket(sock_path).unwrap();
+    let listeners = vec![(profile_name, listener)];
+    let cache: MountCache = Arc::new(RwLock::new(HashMap::new()));
+    let registry = Arc::new(registry);
+    let locks: ConcurrencyLocks = Arc::new(RwLock::new(HashMap::new()));
+    let hook_runner = Arc::new(HookRunner::new(unique_hooks_dir()));
+    let logger = Arc::new(AuditLogger::new(unique_log_path(), 50, 5));
     tokio::spawn(async move {
         run_daemon(
             listeners,
@@ -727,6 +754,42 @@ mod audit_log {
     }
 }
 
+mod opt_in_modules {
+    use super::*;
+
+    #[tokio::test]
+    async fn enabled_command_accepted() {
+        let sock = test_socket_path("optin-enabled");
+        let mut registry = CommandRegistry::new();
+        let enabled: HashSet<String> = ["git"].iter().map(|s| s.to_string()).collect();
+        registry.load_builtins_filtered(&enabled);
+        let _handle = start_daemon_with_registry(&sock, registry).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"git","args":["status"]}}"#;
+        let lines = send_and_collect(&sock, request).await;
+        assert_success(&lines);
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn non_enabled_command_rejected_as_unknown() {
+        let sock = test_socket_path("optin-rejected");
+        let mut registry = CommandRegistry::new();
+        let enabled: HashSet<String> = ["git"].iter().map(|s| s.to_string()).collect();
+        registry.load_builtins_filtered(&enabled);
+        let _handle = start_daemon_with_registry(&sock, registry).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"terraform","args":["plan"]}}"#;
+        let lines = send_and_collect(&sock, request).await;
+        assert_error_contains(&lines, "unknown command");
+
+        let _ = std::fs::remove_file(&sock);
+    }
+}
+
 mod smoke_test_issue_22 {
     use super::*;
 
@@ -805,6 +868,49 @@ mod smoke_test_issue_22 {
                 command: "git",
                 args: vec!["-cevil", "status"],
                 expect_denied: true,
+            },
+            // === SSH deny rules ===
+            Case {
+                name: "ssh -A (agent forwarding)",
+                command: "ssh",
+                args: vec!["-A", "host"],
+                expect_denied: true,
+            },
+            Case {
+                name: "ssh -L (local port forward)",
+                command: "ssh",
+                args: vec!["-L", "8080:localhost:80", "host"],
+                expect_denied: true,
+            },
+            Case {
+                name: "ssh -o (config override)",
+                command: "ssh",
+                args: vec!["-o", "ProxyCommand=evil", "host"],
+                expect_denied: true,
+            },
+            Case {
+                name: "ssh -F (custom config)",
+                command: "ssh",
+                args: vec!["-F", "/tmp/evil.conf", "host"],
+                expect_denied: true,
+            },
+            // === SSH allowed cases ===
+            // NOTE: These test that deny rules do NOT fire. The command reaches
+            // execve, which may fail if ssh is not installed on the test runner.
+            // The test checks for absence of "denied" in the response, so a
+            // spawn error still passes. This is intentional — we're testing the
+            // deny rule boundary, not SSH execution.
+            Case {
+                name: "ssh basic connection (allowed)",
+                command: "ssh",
+                args: vec!["host", "echo", "hi"],
+                expect_denied: false,
+            },
+            Case {
+                name: "ssh -i key (allowed)",
+                command: "ssh",
+                args: vec!["-i", "~/.ssh/key", "host", "deploy"],
+                expect_denied: false,
             },
             // === Must still be allowed ===
             Case {

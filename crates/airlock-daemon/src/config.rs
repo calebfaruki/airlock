@@ -6,6 +6,13 @@ use std::path::Path;
 pub struct Config {
     pub daemon: DaemonConfig,
     pub log: LogConfig,
+    pub commands: CommandsConfig,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct CommandsConfig {
+    pub enable: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -66,5 +73,43 @@ pub fn expand_tilde(path: &str) -> String {
         format!("{home}{rest}")
     } else {
         path.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_commands_enable() {
+        let toml = r#"
+[commands]
+enable = ["git", "aws"]
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.commands.enable,
+            Some(vec!["git".to_string(), "aws".to_string()])
+        );
+    }
+
+    #[test]
+    fn missing_commands_section_is_none() {
+        let toml = r#"
+[daemon]
+log_level = "debug"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.commands.enable.is_none());
+    }
+
+    #[test]
+    fn empty_enable_list_parses_as_empty_vec() {
+        let toml = r#"
+[commands]
+enable = []
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.commands.enable, Some(vec![]));
     }
 }

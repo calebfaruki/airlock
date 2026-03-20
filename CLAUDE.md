@@ -290,6 +290,15 @@ Single command that sets up the host. Idempotent — safe to run multiple times.
 
 On version upgrade, `airlock init` updates the service definition but never touches user files (hooks, command overrides, profiles, config).
 
+## `airlock doctor`
+
+Checks external state that airlock depends on but does not control. Two categories:
+
+1. **Commands** — for each command in `commands.enable`, resolves the binary on PATH. Reports found (with full path) or not found.
+2. **Docker** — checks if `docker` is on PATH, if the daemon is running, and warns about Docker Desktop on macOS (VirtioFS socket permission remapping).
+
+Exit code 0 if no failures, 1 if any binary is missing.
+
 ## Configuration
 
 File at `~/.config/airlock/config.toml`. The `[commands]` section is required — the daemon exits on startup if `commands.enable` is missing or empty.

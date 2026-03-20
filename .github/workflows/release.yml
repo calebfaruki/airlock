@@ -98,11 +98,13 @@ jobs:
             cosign sign-blob --yes "$f" \
               --bundle "$f.bundle"
           done
+      - name: Extract changelog
+        run: awk '/^## /{if(n++)exit}n' CHANGELOG.md > notes.md
       - name: Create release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
         with:
           files: artifacts/*
-          generate_release_notes: true
+          body_path: notes.md
 
   publish-shim-image:
     needs: [build-shim]

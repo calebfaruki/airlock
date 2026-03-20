@@ -1,25 +1,5 @@
 # Changelog
 
-## [0.2.0] - 2026-03-20
-
-### Changed
-- **Breaking:** Command modules are now opt-in. Add `[commands] enable = [...]` to `config.toml`. The daemon exits on startup if this field is missing or empty.
-- `airlock init` generates a starter `config.toml` with a commented-out `[commands]` example. On upgrade, it detects a missing `[commands]` section and prints a migration hint.
-- Startup log changed from "loaded commands" to "enabled commands".
-
-### Security
-- SSH module: added deny rules for agent forwarding (`-A`), port forwarding (`-L`/`-R`/`-D`), config overrides (`-o`/`-F`), ProxyJump (`-J`), stdio forwarding (`-W`), X11 forwarding (`-X`/`-Y`), log file writing (`-E`), TUN/TAP tunneling (`-w`), and control master commands (`-O`).
-- SSH module: stripped `SSH_AUTH_SOCK` from environment.
-- SSH `SECURITY.md` rewritten with full threat model documenting what deny rules guarantee and what they do not.
-
-### Migration
-Add `[commands] enable` to `~/.config/airlock/config.toml`:
-```toml
-[commands]
-enable = ["git", "terraform"]
-```
-Or re-run `airlock init` to get a migration hint.
-
 ## [0.1.0] - 2026-03-18
 
 ### Added

@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 
-use super::deny::{normalize_args, parse_deny_entry, DenyRule};
+use super::deny::{normalize_args, parse_deny_entry, DenyRule, NormalizedArg};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -80,4 +80,50 @@ impl CommandModule {
         }
         None
     }
+
+    pub fn check_deny_verbose(&self, args: &[String]) -> DenyEvaluation {
+        let normalized = normalize_args(args);
+        let rules_checked = self.deny_rules.len();
+        let mut matched_rule = None;
+        let mut matched_detail = None;
+
+        for rule in &self.deny_rules {
+            if let Some(reason) = rule.matches(&normalized) {
+                // Find which normalized arg triggered the match
+                for na in &normalized {
+                    if let Some(ref flag) = na.flag {
+                        if reason.contains(flag) {
+                            matched_detail = Some(format!(
+                                "arg {:?} normalized to flag={:?}, value={:?}",
+                                na.raw,
+                                flag,
+                                na.value.as_deref().unwrap_or("(none)")
+                            ));
+                            break;
+                        }
+                    }
+                    if reason == na.raw {
+                        matched_detail = Some(format!("arg {:?} matched as literal", na.raw));
+                        break;
+                    }
+                }
+                matched_rule = Some(reason);
+                break;
+            }
+        }
+
+        DenyEvaluation {
+            rules_checked,
+            matched_rule,
+            matched_detail,
+            normalized,
+        }
+    }
+}
+
+pub struct DenyEvaluation {
+    pub rules_checked: usize,
+    pub matched_rule: Option<String>,
+    pub matched_detail: Option<String>,
+    pub normalized: Vec<NormalizedArg>,
 }

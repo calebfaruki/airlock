@@ -4,9 +4,19 @@
 
 ## Denied Args
 
-| Arg | Why |
-|-----|-----|
+| Entry | Why |
+|-------|-----|
 | `--privileged` | Disables all Linux security boundaries — trivial container escape via `nsenter`, host filesystem mount, kernel module loading |
+| `-v=/*:*` | Blocks host root filesystem mounts (`-v /:/host`, `-v /etc:/mnt`) |
+| `--volume=/*:*` | Same as above, long form |
+| `-v=*docker.sock*` | Blocks Docker socket mount — Docker-in-Docker escape |
+| `--volume=*docker.sock*` | Same as above, long form |
+| `--pid=host` | Breaks process isolation — container can see/signal host processes |
+| `--net=host` | Breaks network isolation — container shares host network stack |
+| `--network=host` | Same as above, long form |
+| `--ipc=host` | Breaks IPC isolation — shared memory access to host processes |
+| `--cap-add=ALL` | Grants all Linux capabilities — equivalent to `--privileged` |
+| `--security-opt=apparmor:unconfined` | Disables AppArmor mandatory access control |
 
 ## Stripped Env Vars
 
@@ -18,11 +28,8 @@
 
 ## Not Covered
 
-- **Host filesystem mount** (`docker run -v /:/host`) — reads/writes everything on the host
-- **Host namespace escape** (`--pid=host`, `--net=host`, `--ipc=host`) — breaks process and network isolation
-- **Capability escalation** (`--cap-add=ALL`) — equivalent to `--privileged`
-- **Security opt bypass** (`--security-opt=apparmor:unconfined`) — disables AppArmor
 - **Lateral movement** (`docker exec` on other containers) — not restricted
-- **Socket recursion** (`-v /var/run/docker.sock:/var/run/docker.sock`) — Docker-in-Docker escape
+- **Relative path mounts** (`-v ./data:/data`) — only absolute root paths are denied
+- **`--device`** — host device access (e.g., GPU, disk) not restricted
 
-Docker is the most dangerous command to proxy. The deny list covers only `--privileged`. A pre-exec hook should restrict allowed Docker operations to a narrow set (e.g., `docker build`, `docker push` only).
+Docker is the most dangerous command to proxy. A pre-exec hook should restrict allowed Docker operations to a narrow set (e.g., `docker build`, `docker push` only).

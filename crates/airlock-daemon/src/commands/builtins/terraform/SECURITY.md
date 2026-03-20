@@ -4,10 +4,11 @@
 
 ## Denied Args
 
-| Arg | Why |
-|-----|-----|
+| Entry | Why |
+|-------|-----|
 | `destroy` | Deletes all managed infrastructure — irreversible production wipe |
 | `force-unlock` | Removes state lock, enabling concurrent mutations that corrupt state |
+| `apply & -auto-approve` | Skips interactive approval prompt — unattended infrastructure mutation |
 
 ## Concurrency
 
@@ -15,7 +16,6 @@
 
 ## Not Covered
 
-- **`apply -auto-approve`** — not denied; use pre-exec hook to require approval
 - **`state rm/push/mv`** — state manipulation subcommands; consider adding to deny list
 - **`-plugin-dir`** — loads providers from attacker-controlled directory; consider denying
 - **`-chdir`** — escapes CWD mapping; consider denying

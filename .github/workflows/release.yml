@@ -96,8 +96,7 @@ jobs:
         run: |
           for f in artifacts/*; do
             cosign sign-blob --yes "$f" \
-              --output-signature "$f.sig" \
-              --output-certificate "$f.cert"
+              --bundle "$f.bundle"
           done
       - name: Create release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2

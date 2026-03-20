@@ -111,9 +111,7 @@ fn ensure_config(config_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let app_config = Config::load(config_dir);
     if app_config.commands.enable.is_none() {
         println!("airlock: config.toml exists but has no [commands] section");
-        println!(
-            "airlock: the daemon now requires commands.enable — add this to config.toml:"
-        );
+        println!("airlock: the daemon now requires commands.enable — add this to config.toml:");
         println!("airlock:");
         println!("airlock:   [commands]");
         println!("airlock:   enable = [\"git\"]");

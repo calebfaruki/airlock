@@ -123,9 +123,7 @@ impl CommandRegistry {
             };
 
             if !enabled.contains(&name) {
-                eprintln!(
-                    "airlock: skipping user override '{name}' — not in commands.enable"
-                );
+                eprintln!("airlock: skipping user override '{name}' — not in commands.enable");
                 continue;
             }
 
@@ -238,17 +236,11 @@ mod tests {
 
     #[test]
     fn filtered_user_overrides_skips_non_enabled() {
-        let dir = std::env::temp_dir().join(format!(
-            "airlock-test-overrides-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("airlock-test-overrides-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
 
-        std::fs::write(
-            dir.join("git.toml"),
-            "[command]\nbin = \"git-custom\"\n",
-        )
-        .unwrap();
+        std::fs::write(dir.join("git.toml"), "[command]\nbin = \"git-custom\"\n").unwrap();
         std::fs::write(
             dir.join("terraform.toml"),
             "[command]\nbin = \"terraform\"\n",

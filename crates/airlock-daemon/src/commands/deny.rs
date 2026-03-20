@@ -99,7 +99,7 @@ impl DenyRule {
                     }
                     if n.value.is_none() {
                         if let Some(next) = normalized.get(i + 1) {
-                            if matcher.is_match(&next.raw) {
+                            if next.raw != "--" && matcher.is_match(&next.raw) {
                                 return Some(format!("{flag}={pattern}"));
                             }
                         }
@@ -627,6 +627,20 @@ args = ["-v=/*[:*"]
     fn flag_value_raw_fallback_no_false_positive() {
         let rule = flag_value("--pid", "evil");
         let normalized = normalize_args(&args(&["--", "run", "--pid=host", "alpine"]));
+        assert!(rule.matches(&normalized).is_none());
+    }
+
+    #[test]
+    fn flag_value_lookahead_stops_at_double_dash() {
+        let rule = flag_value("-v", "/*:*");
+        let normalized = normalize_args(&args(&["-v", "--", "/:/host"]));
+        assert!(rule.matches(&normalized).is_none());
+    }
+
+    #[test]
+    fn flag_value_lookahead_does_not_match_double_dash() {
+        let rule = flag_value("-v", "*");
+        let normalized = normalize_args(&args(&["-v", "--", "/:/host"]));
         assert!(rule.matches(&normalized).is_none());
     }
 

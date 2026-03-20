@@ -64,7 +64,7 @@ Profiles scope credentials to individual containers. Each profile gets its own u
 
 ```sh
 # Minimal profile — all commands, no credential injection
-touch ~/.config/airlock/profiles/default.toml
+echo 'commands = []' > ~/.config/airlock/profiles/default.toml
 
 # Restricted profile — only git and gh, with a specific SSH key
 cat > ~/.config/airlock/profiles/agent-a.toml << 'EOF'
@@ -169,7 +169,7 @@ Profiles scope credentials to individual containers. Each profile is a TOML file
 ### Schema
 
 ```toml
-# Optional: whitelist of commands. Omit to allow all.
+# Required: allowlist of commands. Use [] to allow all.
 commands = ["git", "gh"]
 
 # Optional: environment variables injected before command execution.
@@ -177,7 +177,7 @@ commands = ["git", "gh"]
 set = { GIT_SSH_COMMAND = "ssh -i ~/.ssh/project_a_key", AWS_PROFILE = "readonly" }
 ```
 
-An empty file is a valid profile — it grants access to all commands with no additional env vars.
+The `commands` field is required. Use `commands = []` to allow all commands. An empty file without `commands` is rejected at startup.
 
 ### Env Merge Order
 
@@ -203,7 +203,7 @@ The daemon requires at least one profile. If `~/.config/airlock/profiles/` is em
 
 v1 used a single shared socket. v2 requires profiles:
 
-1. Create at least one profile: `touch ~/.config/airlock/profiles/default.toml`
+1. Create at least one profile: `echo 'commands = []' > ~/.config/airlock/profiles/default.toml`
 2. Re-run `airlock init` to create the new directories
 3. Update `docker run` commands to mount the profile socket:
    `-v ~/.config/airlock/sockets/default.sock:/run/docker-airlock.sock`

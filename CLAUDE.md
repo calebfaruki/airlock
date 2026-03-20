@@ -84,7 +84,7 @@ commands = ["git", "gh"]
 set = { GIT_SSH_COMMAND = "ssh -i ~/.ssh/project_a_key" }
 ```
 
-Both fields are optional. An empty file is a valid profile (all commands, no env injection).
+`commands` is required. Use `commands = []` to allow all commands. `env` is optional. An empty file without `commands` is rejected at startup.
 
 ### Env Merge Order
 

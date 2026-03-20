@@ -31,7 +31,13 @@ fn unique_log_path() -> std::path::PathBuf {
 
 fn default_profiles() -> ProfileMap {
     let mut map = HashMap::new();
-    map.insert("default".to_string(), Profile::default());
+    map.insert(
+        "default".to_string(),
+        Profile {
+            commands: vec![],
+            env: None,
+        },
+    );
     Arc::new(map)
 }
 

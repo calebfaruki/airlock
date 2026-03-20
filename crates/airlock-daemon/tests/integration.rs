@@ -237,6 +237,191 @@ mod trust_boundary {
     }
 
     #[tokio::test]
+    async fn denies_long_flag_with_equals_value() {
+        let sock = test_socket_path("deny-flag-equals");
+        let _handle = start_daemon(&sock).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"git","args":["--config=evil","status"]}}"#;
+        let lines = send_and_collect(&sock, request).await;
+
+        let resp: AnyResponse = serde_json::from_str(&lines[0]).unwrap();
+        assert!(resp.error.is_some(), "flag=value should be denied");
+        let message = resp.error.unwrap()["message"].as_str().unwrap().to_string();
+        assert!(
+            message.contains("denied"),
+            "error should say 'denied', got: {message}"
+        );
+        assert!(
+            message.contains("--config"),
+            "error should name the flag, got: {message}"
+        );
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn denies_short_flag_with_attached_value() {
+        let sock = test_socket_path("deny-short-attached");
+        let _handle = start_daemon(&sock).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"git","args":["-cevil","status"]}}"#;
+        let lines = send_and_collect(&sock, request).await;
+
+        let resp: AnyResponse = serde_json::from_str(&lines[0]).unwrap();
+        assert!(
+            resp.error.is_some(),
+            "short flag with attached value should be denied"
+        );
+        let message = resp.error.unwrap()["message"].as_str().unwrap().to_string();
+        assert!(
+            message.contains("denied"),
+            "error should say 'denied', got: {message}"
+        );
+        assert!(
+            message.contains("-c"),
+            "error should name the flag, got: {message}"
+        );
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn denies_docker_volume_root_mount() {
+        let sock = test_socket_path("deny-volume-root");
+        let _handle = start_daemon(&sock).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"docker","args":["run","-v","/:/host","alpine"]}}"#;
+        let lines = send_and_collect(&sock, request).await;
+
+        let resp: AnyResponse = serde_json::from_str(&lines[0]).unwrap();
+        assert!(resp.error.is_some(), "root volume mount should be denied");
+        let message = resp.error.unwrap()["message"].as_str().unwrap().to_string();
+        assert!(
+            message.contains("denied"),
+            "error should say 'denied', got: {message}"
+        );
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn denies_docker_pid_host_split() {
+        let sock = test_socket_path("deny-pid-host");
+        let _handle = start_daemon(&sock).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"docker","args":["run","--pid","host","alpine"]}}"#;
+        let lines = send_and_collect(&sock, request).await;
+
+        let resp: AnyResponse = serde_json::from_str(&lines[0]).unwrap();
+        assert!(resp.error.is_some(), "--pid host (split) should be denied");
+        let message = resp.error.unwrap()["message"].as_str().unwrap().to_string();
+        assert!(
+            message.contains("denied"),
+            "error should say 'denied', got: {message}"
+        );
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn denies_docker_pid_host_joined() {
+        let sock = test_socket_path("deny-pid-host-joined");
+        let _handle = start_daemon(&sock).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"docker","args":["run","--pid=host","alpine"]}}"#;
+        let lines = send_and_collect(&sock, request).await;
+
+        let resp: AnyResponse = serde_json::from_str(&lines[0]).unwrap();
+        assert!(resp.error.is_some(), "--pid=host (joined) should be denied");
+        let message = resp.error.unwrap()["message"].as_str().unwrap().to_string();
+        assert!(
+            message.contains("denied"),
+            "error should say 'denied', got: {message}"
+        );
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn denies_terraform_apply_auto_approve() {
+        let sock = test_socket_path("deny-tf-auto-approve");
+        let _handle = start_daemon(&sock).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"terraform","args":["apply","-auto-approve"]}}"#;
+        let lines = send_and_collect(&sock, request).await;
+
+        let resp: AnyResponse = serde_json::from_str(&lines[0]).unwrap();
+        assert!(
+            resp.error.is_some(),
+            "terraform apply -auto-approve should be denied"
+        );
+        let message = resp.error.unwrap()["message"].as_str().unwrap().to_string();
+        assert!(
+            message.contains("denied"),
+            "error should say 'denied', got: {message}"
+        );
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn allows_terraform_apply_alone() {
+        let sock = test_socket_path("allow-tf-apply");
+        let _handle = start_daemon(&sock).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"terraform","args":["apply"]}}"#;
+        let lines = send_and_collect(&sock, request).await;
+
+        // terraform may not be installed, so we just verify the request
+        // was NOT denied by the deny rules (it should pass through to execution)
+        for line in &lines {
+            if let Ok(r) = serde_json::from_str::<AnyResponse>(line) {
+                if let Some(err) = &r.error {
+                    let msg = err["message"].as_str().unwrap_or("");
+                    assert!(
+                        !msg.contains("denied"),
+                        "terraform apply alone should not be denied, got: {msg}"
+                    );
+                }
+            }
+        }
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn allows_docker_named_volume() {
+        let sock = test_socket_path("allow-docker-named-vol");
+        let _handle = start_daemon(&sock).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"docker","args":["run","-v","mydata:/data","alpine"]}}"#;
+        let lines = send_and_collect(&sock, request).await;
+
+        let final_resp = lines.iter().find_map(|l| {
+            let r: AnyResponse = serde_json::from_str(l).ok()?;
+            if r.result.is_some() {
+                Some(r)
+            } else {
+                None
+            }
+        });
+        assert!(
+            final_resp.is_some(),
+            "docker named volume should be allowed"
+        );
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
     async fn pre_exec_hook_can_reject() {
         let hooks_dir = unique_hooks_dir();
         write_hook(
@@ -638,6 +823,165 @@ mod audit_log {
             .as_str()
             .unwrap()
             .contains("unknown command"));
+
+        let _ = std::fs::remove_file(&sock);
+    }
+}
+
+mod smoke_test_issue_22 {
+    use super::*;
+
+    struct Case {
+        name: &'static str,
+        command: &'static str,
+        args: Vec<&'static str>,
+        expect_denied: bool,
+    }
+
+    #[tokio::test]
+    async fn all_issue_22_bypasses_are_blocked() {
+        let cases = vec![
+            // === Previously bypassed, now denied ===
+            Case {
+                name: "terraform apply -auto-approve (sequence)",
+                command: "terraform",
+                args: vec!["apply", "-auto-approve"],
+                expect_denied: true,
+            },
+            Case {
+                name: "docker -v /:/host (root volume mount, detached)",
+                command: "docker",
+                args: vec!["run", "-v", "/:/host", "alpine"],
+                expect_denied: true,
+            },
+            Case {
+                name: "docker --volume=/etc:/mnt (root mount, equals form)",
+                command: "docker",
+                args: vec!["run", "--volume=/etc:/mnt", "alpine"],
+                expect_denied: true,
+            },
+            Case {
+                name: "docker --pid host (flag split)",
+                command: "docker",
+                args: vec!["run", "--pid", "host", "alpine"],
+                expect_denied: true,
+            },
+            Case {
+                name: "docker --pid=host (flag joined)",
+                command: "docker",
+                args: vec!["run", "--pid=host", "alpine"],
+                expect_denied: true,
+            },
+            Case {
+                name: "docker --net=host (network namespace escape)",
+                command: "docker",
+                args: vec!["run", "--net=host", "alpine"],
+                expect_denied: true,
+            },
+            Case {
+                name: "docker --cap-add=ALL (all capabilities)",
+                command: "docker",
+                args: vec!["run", "--cap-add=ALL", "alpine"],
+                expect_denied: true,
+            },
+            Case {
+                name: "docker -v docker.sock (socket mount)",
+                command: "docker",
+                args: vec![
+                    "run",
+                    "-v",
+                    "/var/run/docker.sock:/var/run/docker.sock",
+                    "alpine",
+                ],
+                expect_denied: true,
+            },
+            Case {
+                name: "git --config=evil (flag=value bypass)",
+                command: "git",
+                args: vec!["--config=evil", "status"],
+                expect_denied: true,
+            },
+            Case {
+                name: "git -cevil (short flag attached value bypass)",
+                command: "git",
+                args: vec!["-cevil", "status"],
+                expect_denied: true,
+            },
+            // === Must still be allowed ===
+            Case {
+                name: "terraform apply alone (no -auto-approve)",
+                command: "terraform",
+                args: vec!["apply"],
+                expect_denied: false,
+            },
+            Case {
+                name: "docker named volume (not root path)",
+                command: "docker",
+                args: vec!["run", "-v", "mydata:/data", "alpine"],
+                expect_denied: false,
+            },
+            Case {
+                name: "git status (benign command)",
+                command: "git",
+                args: vec!["status"],
+                expect_denied: false,
+            },
+            Case {
+                name: "git push origin main (benign flags)",
+                command: "git",
+                args: vec!["push", "origin", "main"],
+                expect_denied: false,
+            },
+        ];
+
+        let sock = test_socket_path("smoke-issue-22");
+        let _handle = start_daemon(&sock).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mut passed = 0;
+        let mut failed = Vec::new();
+
+        for case in &cases {
+            let args_json: Vec<String> = case.args.iter().map(|a| format!("\"{}\"", a)).collect();
+            let request = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"exec","params":{{"command":"{}","args":[{}]}}}}"#,
+                case.command,
+                args_json.join(",")
+            );
+
+            let lines = send_and_collect(&sock, &request).await;
+            let got_denied = lines.iter().any(|line| {
+                serde_json::from_str::<AnyResponse>(line)
+                    .ok()
+                    .and_then(|r| r.error)
+                    .and_then(|e| e["message"].as_str().map(|m| m.contains("denied")))
+                    .unwrap_or(false)
+            });
+
+            if got_denied == case.expect_denied {
+                passed += 1;
+                eprintln!("  PASS: {}", case.name);
+            } else {
+                let status = if got_denied { "DENIED" } else { "ALLOWED" };
+                let expected = if case.expect_denied {
+                    "DENIED"
+                } else {
+                    "ALLOWED"
+                };
+                failed.push(format!(
+                    "  FAIL: {} — expected {}, got {}",
+                    case.name, expected, status
+                ));
+            }
+        }
+
+        eprintln!("\n{}/{} cases passed", passed, cases.len());
+        if !failed.is_empty() {
+            for f in &failed {
+                eprintln!("{}", f);
+            }
+            panic!("{} smoke test case(s) failed", failed.len());
+        }
 
         let _ = std::fs::remove_file(&sock);
     }

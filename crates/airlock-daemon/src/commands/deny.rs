@@ -1,0 +1,762 @@
+use globset::Glob;
+
+#[derive(Debug, PartialEq)]
+pub struct NormalizedArg {
+    pub raw: String,
+    pub flag: Option<String>,
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum DenyRule {
+    Arg(String),
+    Sequence(Vec<DenyRule>),
+    FlagValue { flag: String, pattern: String },
+}
+
+fn is_glob_pattern(s: &str) -> bool {
+    s.contains('*') || s.contains('?') || s.contains('[')
+}
+
+pub fn parse_deny_entry(entry: &str) -> DenyRule {
+    parse_deny_entry_inner(entry, 0)
+}
+
+fn parse_deny_entry_inner(entry: &str, depth: u8) -> DenyRule {
+    if depth == 0 && entry.contains(" & ") {
+        DenyRule::Sequence(
+            entry
+                .split(" & ")
+                .map(|e| parse_deny_entry_inner(e, depth + 1))
+                .collect(),
+        )
+    } else if entry.starts_with('-') && entry.contains('=') {
+        let (flag, pattern) = entry.split_once('=').unwrap();
+        DenyRule::FlagValue {
+            flag: flag.into(),
+            pattern: pattern.into(),
+        }
+    } else {
+        DenyRule::Arg(entry.into())
+    }
+}
+
+impl DenyRule {
+    pub fn matches(&self, normalized: &[NormalizedArg]) -> Option<String> {
+        match self {
+            DenyRule::Arg(pattern) => {
+                for n in normalized {
+                    if n.raw == *pattern {
+                        return Some(pattern.clone());
+                    }
+                    if let Some(ref flag) = n.flag {
+                        if flag == pattern {
+                            return Some(pattern.clone());
+                        }
+                    }
+                }
+                None
+            }
+            DenyRule::Sequence(rules) => {
+                let all_match = rules.iter().all(|r| r.matches(normalized).is_some());
+                if all_match {
+                    let descriptions: Vec<String> = rules.iter().map(|r| r.entry_text()).collect();
+                    Some(descriptions.join(" & "))
+                } else {
+                    None
+                }
+            }
+            DenyRule::FlagValue { flag, pattern } => {
+                // Raw string fallback for post-`--` args (literal patterns only)
+                if !is_glob_pattern(pattern) {
+                    let raw_form = format!("{flag}={pattern}");
+                    for n in normalized {
+                        if n.raw == raw_form {
+                            return Some(raw_form);
+                        }
+                    }
+                }
+
+                let glob = match Glob::new(pattern) {
+                    Ok(g) => g.compile_matcher(),
+                    Err(_) => return None,
+                };
+                for (i, n) in normalized.iter().enumerate() {
+                    if n.flag.as_deref() != Some(flag) {
+                        continue;
+                    }
+                    if let Some(ref val) = n.value {
+                        if glob.is_match(val) {
+                            return Some(format!("{flag}={pattern}"));
+                        }
+                    }
+                    if n.value.is_none() {
+                        if let Some(next) = normalized.get(i + 1) {
+                            if glob.is_match(&next.raw) {
+                                return Some(format!("{flag}={pattern}"));
+                            }
+                        }
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    fn entry_text(&self) -> String {
+        match self {
+            DenyRule::Arg(s) => s.clone(),
+            DenyRule::FlagValue { flag, pattern } => format!("{flag}={pattern}"),
+            DenyRule::Sequence(rules) => rules
+                .iter()
+                .map(|r| r.entry_text())
+                .collect::<Vec<_>>()
+                .join(" & "),
+        }
+    }
+}
+
+pub fn normalize_args(args: &[String]) -> Vec<NormalizedArg> {
+    let mut result = Vec::with_capacity(args.len());
+    let mut options_ended = false;
+    for arg in args {
+        if arg == "--" {
+            options_ended = true;
+            result.push(NormalizedArg {
+                raw: arg.clone(),
+                flag: None,
+                value: None,
+            });
+        } else if options_ended {
+            result.push(NormalizedArg {
+                raw: arg.clone(),
+                flag: None,
+                value: None,
+            });
+        } else {
+            result.push(normalize_one(arg));
+        }
+    }
+    result
+}
+
+fn normalize_one(arg: &str) -> NormalizedArg {
+    if let Some(rest) = arg.strip_prefix("--") {
+        if rest.is_empty() {
+            return NormalizedArg {
+                raw: arg.to_string(),
+                flag: None,
+                value: None,
+            };
+        }
+        if let Some(eq_pos) = rest.find('=') {
+            let flag = format!("--{}", &rest[..eq_pos]);
+            let value = rest[eq_pos + 1..].to_string();
+            NormalizedArg {
+                raw: arg.to_string(),
+                flag: Some(flag),
+                value: Some(value),
+            }
+        } else {
+            NormalizedArg {
+                raw: arg.to_string(),
+                flag: Some(arg.to_string()),
+                value: None,
+            }
+        }
+    } else if let Some(rest) = arg.strip_prefix('-') {
+        if rest.is_empty() {
+            return NormalizedArg {
+                raw: arg.to_string(),
+                flag: None,
+                value: None,
+            };
+        }
+        let mut chars = rest.chars();
+        let flag_char = chars.next().unwrap();
+        let remainder: String = chars.collect();
+        let flag = format!("-{flag_char}");
+        if remainder.is_empty() {
+            NormalizedArg {
+                raw: arg.to_string(),
+                flag: Some(flag),
+                value: None,
+            }
+        } else {
+            NormalizedArg {
+                raw: arg.to_string(),
+                flag: Some(flag),
+                value: Some(remainder),
+            }
+        }
+    } else {
+        NormalizedArg {
+            raw: arg.to_string(),
+            flag: None,
+            value: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn norm(s: &str) -> NormalizedArg {
+        normalize_one(s)
+    }
+
+    fn args(strs: &[&str]) -> Vec<String> {
+        strs.iter().map(|s| s.to_string()).collect()
+    }
+
+    // --- Normalization tests ---
+
+    #[test]
+    fn long_flag_with_equals() {
+        assert_eq!(
+            norm("--config=evil"),
+            NormalizedArg {
+                raw: "--config=evil".into(),
+                flag: Some("--config".into()),
+                value: Some("evil".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn long_flag_without_value() {
+        assert_eq!(
+            norm("--verbose"),
+            NormalizedArg {
+                raw: "--verbose".into(),
+                flag: Some("--verbose".into()),
+                value: None,
+            }
+        );
+    }
+
+    #[test]
+    fn short_flag_alone() {
+        assert_eq!(
+            norm("-c"),
+            NormalizedArg {
+                raw: "-c".into(),
+                flag: Some("-c".into()),
+                value: None,
+            }
+        );
+    }
+
+    #[test]
+    fn short_flag_with_attached_value() {
+        assert_eq!(
+            norm("-cevil"),
+            NormalizedArg {
+                raw: "-cevil".into(),
+                flag: Some("-c".into()),
+                value: Some("evil".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn double_dash_is_positional() {
+        assert_eq!(
+            norm("--"),
+            NormalizedArg {
+                raw: "--".into(),
+                flag: None,
+                value: None,
+            }
+        );
+    }
+
+    #[test]
+    fn single_dash_is_positional() {
+        assert_eq!(
+            norm("-"),
+            NormalizedArg {
+                raw: "-".into(),
+                flag: None,
+                value: None,
+            }
+        );
+    }
+
+    #[test]
+    fn positional_arg() {
+        assert_eq!(
+            norm("status"),
+            NormalizedArg {
+                raw: "status".into(),
+                flag: None,
+                value: None,
+            }
+        );
+    }
+
+    #[test]
+    fn empty_string_is_positional() {
+        assert_eq!(
+            norm(""),
+            NormalizedArg {
+                raw: "".into(),
+                flag: None,
+                value: None,
+            }
+        );
+    }
+
+    #[test]
+    fn long_flag_with_empty_value() {
+        assert_eq!(
+            norm("--config="),
+            NormalizedArg {
+                raw: "--config=".into(),
+                flag: Some("--config".into()),
+                value: Some("".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn long_flag_with_multiple_equals() {
+        assert_eq!(
+            norm("--config=key=value"),
+            NormalizedArg {
+                raw: "--config=key=value".into(),
+                flag: Some("--config".into()),
+                value: Some("key=value".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn normalize_preserves_order_and_count() {
+        let a = args(&["push", "--force", "-v", "origin"]);
+        let normalized = normalize_args(&a);
+        assert_eq!(normalized.len(), a.len());
+        let raws: Vec<&str> = normalized.iter().map(|n| n.raw.as_str()).collect();
+        assert_eq!(raws, vec!["push", "--force", "-v", "origin"]);
+    }
+
+    #[test]
+    fn unicode_arg_does_not_panic() {
+        let n = norm("--émoji=🎉");
+        assert_eq!(n.flag, Some("--émoji".into()));
+        assert_eq!(n.value, Some("🎉".into()));
+    }
+
+    // --- End-of-options (--) tests ---
+
+    #[test]
+    fn args_after_double_dash_are_positional() {
+        let normalized = normalize_args(&args(&["checkout", "--", "--config=evil"]));
+        assert_eq!(normalized[2].flag, None);
+        assert_eq!(normalized[2].value, None);
+        assert_eq!(normalized[2].raw, "--config=evil");
+    }
+
+    // --- parse_deny_entry tests ---
+
+    #[test]
+    fn parse_entry_plain_arg() {
+        match parse_deny_entry("destroy") {
+            DenyRule::Arg(s) => assert_eq!(s, "destroy"),
+            other => panic!("expected Arg, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_entry_flag_value_long() {
+        match parse_deny_entry("--pid=host") {
+            DenyRule::FlagValue { flag, pattern } => {
+                assert_eq!(flag, "--pid");
+                assert_eq!(pattern, "host");
+            }
+            other => panic!("expected FlagValue, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_entry_flag_value_short() {
+        match parse_deny_entry("-v=/*:*") {
+            DenyRule::FlagValue { flag, pattern } => {
+                assert_eq!(flag, "-v");
+                assert_eq!(pattern, "/*:*");
+            }
+            other => panic!("expected FlagValue, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_entry_sequence() {
+        match parse_deny_entry("apply & -auto-approve") {
+            DenyRule::Sequence(rules) => {
+                assert_eq!(rules.len(), 2);
+                assert!(matches!(&rules[0], DenyRule::Arg(s) if s == "apply"));
+                assert!(matches!(&rules[1], DenyRule::Arg(s) if s == "-auto-approve"));
+            }
+            other => panic!("expected Sequence, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_entry_positional_with_equals() {
+        match parse_deny_entry("not-a-flag=value") {
+            DenyRule::Arg(s) => assert_eq!(s, "not-a-flag=value"),
+            other => panic!("expected Arg, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_entry_sequence_with_flag_value() {
+        match parse_deny_entry("run & -v=/*:*") {
+            DenyRule::Sequence(rules) => {
+                assert_eq!(rules.len(), 2);
+                assert!(matches!(&rules[0], DenyRule::Arg(s) if s == "run"));
+                assert!(matches!(&rules[1], DenyRule::FlagValue { flag, pattern }
+                    if flag == "-v" && pattern == "/*:*"));
+            }
+            other => panic!("expected Sequence, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_entry_sequence_depth_capped() {
+        // Nested " & " inside a sequence element is treated as literal
+        match parse_deny_entry("a & b & c") {
+            DenyRule::Sequence(rules) => {
+                assert_eq!(rules.len(), 3);
+                assert!(matches!(&rules[0], DenyRule::Arg(s) if s == "a"));
+                assert!(matches!(&rules[1], DenyRule::Arg(s) if s == "b"));
+                assert!(matches!(&rules[2], DenyRule::Arg(s) if s == "c"));
+            }
+            other => panic!("expected Sequence, got {:?}", other),
+        }
+    }
+
+    // --- Arg rule tests ---
+
+    #[test]
+    fn arg_rule_exact_raw_match() {
+        let rule = DenyRule::Arg("destroy".into());
+        let normalized = normalize_args(&args(&["apply", "destroy"]));
+        assert!(rule.matches(&normalized).is_some());
+    }
+
+    #[test]
+    fn arg_rule_no_match() {
+        let rule = DenyRule::Arg("destroy".into());
+        let normalized = normalize_args(&args(&["apply", "plan"]));
+        assert!(rule.matches(&normalized).is_none());
+    }
+
+    #[test]
+    fn arg_rule_matches_normalized_long_flag() {
+        let rule = DenyRule::Arg("--config".into());
+        let normalized = normalize_args(&args(&["--config=evil", "status"]));
+        assert!(rule.matches(&normalized).is_some());
+    }
+
+    #[test]
+    fn arg_rule_matches_normalized_short_flag() {
+        let rule = DenyRule::Arg("-c".into());
+        let normalized = normalize_args(&args(&["-cevil", "status"]));
+        assert!(rule.matches(&normalized).is_some());
+    }
+
+    #[test]
+    fn arg_rule_does_not_match_unrelated_flag() {
+        let rule = DenyRule::Arg("--config".into());
+        let normalized = normalize_args(&args(&["--other=val"]));
+        assert!(rule.matches(&normalized).is_none());
+    }
+
+    #[test]
+    fn raw_deny_still_applies_after_double_dash() {
+        let rule = DenyRule::Arg("--privileged".into());
+        let normalized = normalize_args(&args(&["--", "run", "--privileged", "alpine"]));
+        assert!(rule.matches(&normalized).is_some());
+    }
+
+    #[test]
+    fn raw_deny_after_double_dash_no_false_positive() {
+        let rule = DenyRule::Arg("--pid=host".into());
+        let normalized = normalize_args(&args(&["--", "--pid=host"]));
+        assert!(rule.matches(&normalized).is_some());
+
+        let rule2 = DenyRule::Arg("--pid=evil".into());
+        assert!(rule2.matches(&normalized).is_none());
+    }
+
+    // --- Sequence rule tests ---
+
+    #[test]
+    fn sequence_all_present() {
+        let rule = parse_deny_entry("apply & -auto-approve");
+        let normalized = normalize_args(&args(&["apply", "-auto-approve"]));
+        assert!(rule.matches(&normalized).is_some());
+    }
+
+    #[test]
+    fn sequence_one_missing() {
+        let rule = parse_deny_entry("apply & -auto-approve");
+        let normalized = normalize_args(&args(&["apply"]));
+        assert!(rule.matches(&normalized).is_none());
+    }
+
+    #[test]
+    fn sequence_order_independent() {
+        let rule = parse_deny_entry("apply & -auto-approve");
+        let normalized = normalize_args(&args(&["-auto-approve", "apply"]));
+        assert!(rule.matches(&normalized).is_some());
+    }
+
+    #[test]
+    fn sequence_with_extra_args() {
+        let rule = parse_deny_entry("apply & -auto-approve");
+        let normalized = normalize_args(&args(&["plan", "apply", "-auto-approve", "-input=false"]));
+        assert!(rule.matches(&normalized).is_some());
+    }
+
+    #[test]
+    fn sequence_with_flag_value_element() {
+        let rule = parse_deny_entry("run & -v=/*:*");
+        let normalized = normalize_args(&args(&["run", "-v", "/:/host"]));
+        assert!(rule.matches(&normalized).is_some());
+    }
+
+    #[test]
+    fn sequence_with_flag_value_no_match() {
+        let rule = parse_deny_entry("run & -v=/*:*");
+        let normalized = normalize_args(&args(&["run", "-v", "mydata:/data"]));
+        assert!(rule.matches(&normalized).is_none());
+    }
+
+    #[test]
+    fn sequence_with_flag_value_missing_positional() {
+        let rule = parse_deny_entry("run & -v=/*:*");
+        let normalized = normalize_args(&args(&["-v", "/:/host"]));
+        assert!(rule.matches(&normalized).is_none());
+    }
+
+    // --- FlagValue rule tests ---
+
+    #[test]
+    fn flag_value_attached_short() {
+        let rule = DenyRule::FlagValue {
+            flag: "-v".into(),
+            pattern: "/*:*".into(),
+        };
+        let normalized = normalize_args(&args(&["run", "-v/:/host", "alpine"]));
+        assert!(rule.matches(&normalized).is_some());
+    }
+
+    #[test]
+    fn flag_value_detached() {
+        let rule = DenyRule::FlagValue {
+            flag: "-v".into(),
+            pattern: "/*:*".into(),
+        };
+        let normalized = normalize_args(&args(&["run", "-v", "/:/host", "alpine"]));
+        assert!(rule.matches(&normalized).is_some());
+    }
+
+    #[test]
+    fn flag_value_long_with_equals() {
+        let rule = DenyRule::FlagValue {
+            flag: "--volume".into(),
+            pattern: "/*:*".into(),
+        };
+        let normalized = normalize_args(&args(&["run", "--volume=/etc:/mnt", "alpine"]));
+        assert!(rule.matches(&normalized).is_some());
+    }
+
+    #[test]
+    fn flag_value_pattern_no_match() {
+        let rule = DenyRule::FlagValue {
+            flag: "-v".into(),
+            pattern: "/*:*".into(),
+        };
+        let normalized = normalize_args(&args(&["run", "-v", "mydata:/data", "alpine"]));
+        assert!(rule.matches(&normalized).is_none());
+    }
+
+    #[test]
+    fn flag_value_no_value_present() {
+        let rule = DenyRule::FlagValue {
+            flag: "-v".into(),
+            pattern: "/*:*".into(),
+        };
+        let normalized = normalize_args(&args(&["run", "-v"]));
+        assert!(rule.matches(&normalized).is_none());
+    }
+
+    #[test]
+    fn flag_value_wrong_flag() {
+        let rule = DenyRule::FlagValue {
+            flag: "-v".into(),
+            pattern: "/*:*".into(),
+        };
+        let normalized = normalize_args(&args(&["run", "-p", "/:/host"]));
+        assert!(rule.matches(&normalized).is_none());
+    }
+
+    #[test]
+    fn flag_value_raw_fallback_after_double_dash() {
+        let rule = DenyRule::FlagValue {
+            flag: "--pid".into(),
+            pattern: "host".into(),
+        };
+        let normalized = normalize_args(&args(&["--", "run", "--pid=host", "alpine"]));
+        assert!(rule.matches(&normalized).is_some());
+    }
+
+    #[test]
+    fn flag_value_raw_fallback_no_false_positive() {
+        let rule = DenyRule::FlagValue {
+            flag: "--pid".into(),
+            pattern: "evil".into(),
+        };
+        let normalized = normalize_args(&args(&["--", "run", "--pid=host", "alpine"]));
+        assert!(rule.matches(&normalized).is_none());
+    }
+
+    #[test]
+    fn flag_value_glob_skips_raw_fallback() {
+        // Glob patterns should NOT match via raw fallback after --
+        let rule = DenyRule::FlagValue {
+            flag: "-v".into(),
+            pattern: "/*:*".into(),
+        };
+        let normalized = normalize_args(&args(&["--", "-v=/*:*"]));
+        assert!(rule.matches(&normalized).is_none());
+    }
+
+    // --- matches() return value tests ---
+
+    #[test]
+    fn arg_match_returns_entry_text() {
+        let rule = DenyRule::Arg("--privileged".into());
+        let normalized = normalize_args(&args(&["--privileged"]));
+        assert_eq!(rule.matches(&normalized).unwrap(), "--privileged");
+    }
+
+    #[test]
+    fn flag_value_match_returns_entry_text() {
+        let rule = DenyRule::FlagValue {
+            flag: "--pid".into(),
+            pattern: "host".into(),
+        };
+        let normalized = normalize_args(&args(&["--pid=host"]));
+        assert_eq!(rule.matches(&normalized).unwrap(), "--pid=host");
+    }
+
+    #[test]
+    fn sequence_match_returns_entry_text() {
+        let rule = parse_deny_entry("apply & -auto-approve");
+        let normalized = normalize_args(&args(&["apply", "-auto-approve"]));
+        assert_eq!(rule.matches(&normalized).unwrap(), "apply & -auto-approve");
+    }
+
+    // --- DenySection deserialization tests ---
+
+    #[test]
+    fn deserialize_args_only() {
+        use crate::commands::module::DenySection;
+        let toml_str = r#"args = ["--config", "-c"]"#;
+        let deny: DenySection =
+            toml::from_str(toml_str).expect("should parse args-only deny section");
+        assert_eq!(deny.args, vec!["--config", "-c"]);
+    }
+
+    // --- Property-based tests ---
+
+    use proptest::prelude::*;
+
+    fn arb_arg() -> impl Strategy<Value = String> {
+        prop_oneof![
+            "[a-z]{1,8}",
+            "--[a-z]{1,8}",
+            "--[a-z]{1,8}=[a-z0-9/:.]{1,12}",
+            "-[a-z]",
+            "-[a-z][a-z0-9/:.]{1,8}",
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn normalization_is_lossless(args in prop::collection::vec(arb_arg(), 0..20)) {
+            let normalized = normalize_args(&args);
+            let raws: Vec<&str> = normalized.iter().map(|n| n.raw.as_str()).collect();
+            let originals: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            prop_assert_eq!(raws, originals);
+        }
+
+        #[test]
+        fn arg_rule_split_joined_equivalence(flag in "--[a-z]{1,8}", value in "[a-z0-9]{1,8}") {
+            let rule = DenyRule::Arg(flag.clone());
+            let joined = vec![format!("{flag}={value}")];
+            let split = vec![flag.clone(), value];
+            let norm_joined = normalize_args(&joined);
+            let norm_split = normalize_args(&split);
+            prop_assert_eq!(
+                rule.matches(&norm_joined).is_some(),
+                rule.matches(&norm_split).is_some(),
+                "split and joined forms should produce identical Arg match results"
+            );
+        }
+
+        #[test]
+        fn no_flags_after_double_dash(
+            before in prop::collection::vec(arb_arg(), 0..5),
+            after in prop::collection::vec(arb_arg(), 1..5),
+        ) {
+            let mut all = before;
+            all.push("--".to_string());
+            all.extend(after);
+            let normalized = normalize_args(&all);
+            let dd_pos = normalized.iter().position(|n| n.raw == "--").unwrap();
+            for n in &normalized[dd_pos + 1..] {
+                prop_assert_eq!(&n.flag, &None, "args after -- should have no flag");
+            }
+        }
+
+        #[test]
+        fn parse_entry_classification(entry in "[a-z\\-=&/ *?]{1,20}") {
+            let rule = parse_deny_entry(&entry);
+            if entry.contains(" & ") {
+                prop_assert!(matches!(rule, DenyRule::Sequence(_)),
+                    "entry with ' & ' should be Sequence");
+            } else if entry.starts_with('-') && entry.contains('=') {
+                let is_fv = matches!(rule, DenyRule::FlagValue { .. });
+                prop_assert!(is_fv, "entry starting with - containing = should be FlagValue");
+            } else {
+                prop_assert!(matches!(rule, DenyRule::Arg(_)),
+                    "other entries should be Arg");
+            }
+        }
+    }
+
+    // --- Full module parse tests ---
+
+    #[test]
+    fn full_module_with_flat_deny_rules() {
+        let toml_str = r#"
+[command]
+bin = "docker"
+
+[deny]
+args = ["--privileged", "-v=/*:*", "run & --net=host"]
+
+[exec]
+concurrent = true
+"#;
+        let module =
+            crate::commands::CommandModule::parse(toml_str).expect("should parse full module");
+        let deny = module.deny.as_ref().unwrap();
+        assert_eq!(deny.args.len(), 3);
+    }
+}

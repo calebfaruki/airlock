@@ -103,6 +103,7 @@ airlock-daemon init              # Install as system service (systemd/launchd)
 airlock-daemon init --uninstall  # Remove system service
 airlock-daemon check             # Validate all command modules
 airlock-daemon doctor            # Check host binaries and Docker
+airlock-daemon why <p> <cmd> ... # Dry-run command through evaluation pipeline
 airlock-daemon version           # Print version
 airlock-daemon profile list      # List profiles and socket paths
 airlock-daemon profile show <n>  # Print a profile's TOML

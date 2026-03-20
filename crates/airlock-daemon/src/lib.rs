@@ -5,6 +5,7 @@ pub mod hooks;
 pub mod init;
 pub mod logging;
 pub mod profile;
+pub mod why;
 
 use commands::CommandRegistry;
 use hooks::{HookRunner, PostExecResult, PreExecResult};

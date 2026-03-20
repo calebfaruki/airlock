@@ -299,6 +299,19 @@ Checks external state that airlock depends on but does not control. Two categori
 
 Exit code 0 if no failures, 1 if any binary is missing.
 
+## `airlock why`
+
+Dry-runs a command through the evaluation pipeline without executing it. Shows all four decision steps:
+
+1. **Command enabled?** — is the command in `commands.enable`?
+2. **Module found?** — built-in or user override? (informational, never denies independently)
+3. **Deny rules?** — normalized args evaluated against all deny rules
+4. **Profile allows?** — is the command in the profile's `commands` list?
+
+Usage: `airlock-daemon why <profile> <command> [args...]`
+
+Exit code 0 if allowed, 1 if denied.
+
 ## Configuration
 
 File at `~/.config/airlock/config.toml`. The `[commands]` section is required — the daemon exits on startup if `commands.enable` is missing or empty.

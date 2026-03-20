@@ -4,6 +4,7 @@ use airlock_daemon::doctor;
 use airlock_daemon::hooks::HookRunner;
 use airlock_daemon::logging::AuditLogger;
 use airlock_daemon::profile::Profile;
+use airlock_daemon::why;
 use airlock_daemon::{bind_profile_socket, run_daemon, ConcurrencyLocks, MountCache, ProfileMap};
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -37,6 +38,31 @@ fn load_registry() -> CommandRegistry {
     let mut registry = CommandRegistry::new();
     registry.load_builtins();
     registry.load_user_overrides(&user_commands_dir());
+    registry
+}
+
+fn require_enabled_commands() -> (Config, HashSet<String>) {
+    let app_config = Config::load(&config_dir());
+    let enabled: HashSet<String> = match &app_config.commands.enable {
+        Some(list) if list.is_empty() => {
+            eprintln!(
+                "airlock: commands.enable is empty — enable at least one command in config.toml"
+            );
+            std::process::exit(1);
+        }
+        Some(list) => list.iter().cloned().collect(),
+        None => {
+            eprintln!("airlock: no commands enabled — add [commands] enable = [\"git\"] to ~/.config/airlock/config.toml");
+            std::process::exit(1);
+        }
+    };
+    (app_config, enabled)
+}
+
+fn load_filtered_registry(enabled: &HashSet<String>) -> CommandRegistry {
+    let mut registry = CommandRegistry::new();
+    registry.load_builtins_filtered(enabled);
+    registry.load_user_overrides_filtered(&user_commands_dir(), enabled);
     registry
 }
 
@@ -240,19 +266,8 @@ async fn main() {
             return;
         }
         "doctor" => {
-            let app_config = Config::load(&config_dir());
-            let enabled: HashSet<String> = match &app_config.commands.enable {
-                Some(list) if !list.is_empty() => list.iter().cloned().collect(),
-                _ => {
-                    eprintln!(
-                        "airlock: no commands enabled — add [commands] enable to config.toml"
-                    );
-                    std::process::exit(1);
-                }
-            };
-            let mut registry = CommandRegistry::new();
-            registry.load_builtins_filtered(&enabled);
-            registry.load_user_overrides_filtered(&user_commands_dir(), &enabled);
+            let (_, enabled) = require_enabled_commands();
+            let registry = load_filtered_registry(&enabled);
 
             let cmd_results = doctor::check_commands(&registry);
             doctor::print_results("Commands", &cmd_results);
@@ -261,6 +276,61 @@ async fn main() {
             doctor::print_results("Docker", &docker_results);
 
             if doctor::has_failures(&cmd_results) || doctor::has_failures(&docker_results) {
+                std::process::exit(1);
+            }
+            return;
+        }
+        "why" => {
+            let profile_name = match args.get(2) {
+                Some(p) => p,
+                None => {
+                    eprintln!("usage: airlock-daemon why <profile> <command> [args...]");
+                    std::process::exit(1);
+                }
+            };
+            let command = match args.get(3) {
+                Some(c) => c,
+                None => {
+                    eprintln!("usage: airlock-daemon why <profile> <command> [args...]");
+                    std::process::exit(1);
+                }
+            };
+            let cmd_args: Vec<String> = args[4..].to_vec();
+
+            let (_, enabled) = require_enabled_commands();
+            let registry = load_filtered_registry(&enabled);
+
+            let profile_path = profiles_dir().join(format!("{profile_name}.toml"));
+            let profile_content = match std::fs::read_to_string(&profile_path) {
+                Ok(c) => c,
+                Err(_) => {
+                    eprintln!(
+                        "airlock: profile '{profile_name}' not found at {}",
+                        profile_path.display()
+                    );
+                    std::process::exit(1);
+                }
+            };
+            let profile = match Profile::parse(&profile_content) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("airlock: failed to parse profile '{profile_name}': {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            let result = why::evaluate(
+                profile_name,
+                &profile,
+                command,
+                &cmd_args,
+                &enabled,
+                &registry,
+                &hooks_dir(),
+            );
+            why::print_result(&result);
+
+            if result.outcome != "ALLOWED" {
                 std::process::exit(1);
             }
             return;
@@ -322,7 +392,7 @@ async fn main() {
         }
         _ => {
             eprintln!(
-                "usage: airlock-daemon <start|version|init|check|doctor|show|diff|eject|profile>"
+                "usage: airlock-daemon <start|version|init|check|doctor|why|show|diff|eject|profile>"
             );
             std::process::exit(1);
         }
@@ -410,7 +480,7 @@ async fn main() {
 
     let profiles: ProfileMap = Arc::new(profile_map);
 
-    let app_config = Config::load(&config_dir());
+    let (app_config, enabled_commands) = require_enabled_commands();
     let log_path = config::expand_tilde(&app_config.log.path);
     if let Some(dir) = std::path::Path::new(&log_path).parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -421,24 +491,8 @@ async fn main() {
         app_config.log.max_files,
     ));
 
-    let enabled_commands: HashSet<String> = match &app_config.commands.enable {
-        Some(list) if list.is_empty() => {
-            eprintln!(
-                "airlock: commands.enable is empty — enable at least one command in config.toml"
-            );
-            std::process::exit(1);
-        }
-        Some(list) => list.iter().cloned().collect(),
-        None => {
-            eprintln!("airlock: no commands enabled — add [commands] enable = [\"git\"] to ~/.config/airlock/config.toml");
-            std::process::exit(1);
-        }
-    };
-
     let mount_cache: MountCache = Arc::new(RwLock::new(HashMap::new()));
-    let mut registry = CommandRegistry::new();
-    registry.load_builtins_filtered(&enabled_commands);
-    registry.load_user_overrides_filtered(&user_commands_dir(), &enabled_commands);
+    let registry = load_filtered_registry(&enabled_commands);
     eprintln!(
         "airlock: enabled commands: {}",
         registry.command_names().join(", ")

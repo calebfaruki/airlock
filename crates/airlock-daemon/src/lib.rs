@@ -290,14 +290,14 @@ pub async fn handle_connection(
         }
     };
 
-    if let Some(denied_arg) = module.check_deny(&params.args) {
-        let reason = format!("denied arg: {}", denied_arg);
+    if let Some(denied) = module.check_deny(&params.args) {
+        let reason = format!("denied: '{}' not permitted", denied);
         let err = build_error_response(
             id,
             -32600,
             format!(
-                "denied: arg '{}' not permitted for '{}'",
-                denied_arg, params.command
+                "denied: '{}' not permitted for '{}'",
+                denied, params.command
             ),
         );
         writer
@@ -363,14 +363,14 @@ pub async fn handle_connection(
                 }
             };
 
-            if let Some(denied_arg) = new_module.check_deny(&new_params.args) {
-                let reason = format!("denied arg: {}", denied_arg);
+            if let Some(denied) = new_module.check_deny(&new_params.args) {
+                let reason = format!("denied: '{}' not permitted", denied);
                 let err = build_error_response(
                     new_id,
                     -32600,
                     format!(
-                        "denied: arg '{}' not permitted for '{}'",
-                        denied_arg, new_params.command
+                        "denied: '{}' not permitted for '{}'",
+                        denied, new_params.command
                     ),
                 );
                 writer

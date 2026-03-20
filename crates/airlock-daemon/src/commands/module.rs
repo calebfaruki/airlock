@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 
+use super::deny::{normalize_args, parse_deny_entry, DenyRule};
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandModule {
@@ -9,6 +11,8 @@ pub struct CommandModule {
     pub env: Option<EnvSection>,
     pub args: Option<ArgsSection>,
     pub exec: Option<ExecSection>,
+    #[serde(skip)]
+    deny_rules: Vec<DenyRule>,
 }
 
 #[derive(Deserialize)]
@@ -44,7 +48,14 @@ pub struct ExecSection {
 
 impl CommandModule {
     pub fn parse(toml_str: &str) -> Result<Self, String> {
-        toml::from_str(toml_str).map_err(|e| format!("failed to parse command module: {e}"))
+        let mut module: Self =
+            toml::from_str(toml_str).map_err(|e| format!("failed to parse command module: {e}"))?;
+        module.deny_rules = module
+            .deny
+            .as_ref()
+            .map(|d| d.args.iter().map(|a| parse_deny_entry(a)).collect())
+            .unwrap_or_default();
+        Ok(module)
     }
 
     pub fn is_concurrent(&self) -> bool {
@@ -54,13 +65,14 @@ impl CommandModule {
             .unwrap_or(true)
     }
 
-    pub fn check_deny(&self, args: &[String]) -> Option<&str> {
-        let deny = self.deny.as_ref()?;
-        for arg in args {
-            for denied in &deny.args {
-                if arg == denied {
-                    return Some(denied);
-                }
+    pub fn check_deny(&self, args: &[String]) -> Option<String> {
+        if self.deny_rules.is_empty() {
+            return None;
+        }
+        let normalized = normalize_args(args);
+        for rule in &self.deny_rules {
+            if let Some(reason) = rule.matches(&normalized) {
+                return Some(reason);
             }
         }
         None

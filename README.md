@@ -46,11 +46,10 @@ This downloads the daemon, installs it to `~/.local/bin/`, and runs `airlock ini
 
 ### Container Setup
 
-Download the shim from [releases](https://github.com/calebfaruki/airlock/releases) and add to your Dockerfile:
+Copy the shim from the container image or download from [releases](https://github.com/calebfaruki/airlock/releases):
 
 ```dockerfile
-ADD https://github.com/calebfaruki/airlock/releases/latest/download/airlock-shim-linux-amd64 \
-    /usr/local/airlock/bin/airlock-shim
+COPY --from=ghcr.io/calebfaruki/airlock-shim:latest /airlock-shim /usr/local/airlock/bin/airlock-shim
 RUN chmod +x /usr/local/airlock/bin/airlock-shim
 ENV PATH="/usr/local/airlock/bin:$PATH"
 RUN ln -s airlock-shim /usr/local/airlock/bin/git \

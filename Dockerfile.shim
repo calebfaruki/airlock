@@ -1,0 +1,3 @@
+FROM scratch
+ARG TARGETARCH
+COPY airlock-shim-linux-${TARGETARCH} /airlock-shim

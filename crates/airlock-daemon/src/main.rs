@@ -1,5 +1,6 @@
 use airlock_daemon::commands::CommandRegistry;
 use airlock_daemon::config::{self, Config};
+use airlock_daemon::doctor;
 use airlock_daemon::hooks::HookRunner;
 use airlock_daemon::logging::AuditLogger;
 use airlock_daemon::profile::Profile;
@@ -238,6 +239,32 @@ async fn main() {
             }
             return;
         }
+        "doctor" => {
+            let app_config = Config::load(&config_dir());
+            let enabled: HashSet<String> = match &app_config.commands.enable {
+                Some(list) if !list.is_empty() => list.iter().cloned().collect(),
+                _ => {
+                    eprintln!(
+                        "airlock: no commands enabled — add [commands] enable to config.toml"
+                    );
+                    std::process::exit(1);
+                }
+            };
+            let mut registry = CommandRegistry::new();
+            registry.load_builtins_filtered(&enabled);
+            registry.load_user_overrides_filtered(&user_commands_dir(), &enabled);
+
+            let cmd_results = doctor::check_commands(&registry);
+            doctor::print_results("Commands", &cmd_results);
+
+            let docker_results = doctor::check_docker();
+            doctor::print_results("Docker", &docker_results);
+
+            if doctor::has_failures(&cmd_results) || doctor::has_failures(&docker_results) {
+                std::process::exit(1);
+            }
+            return;
+        }
         "profile" => {
             let sub = args.get(2).map(|s| s.as_str()).unwrap_or("help");
             match sub {
@@ -294,7 +321,7 @@ async fn main() {
             return;
         }
         _ => {
-            eprintln!("usage: airlock-daemon <start|version|init|check|show|diff|eject|profile>");
+            eprintln!("usage: airlock-daemon <start|version|init|check|doctor|show|diff|eject|profile>");
             std::process::exit(1);
         }
     }

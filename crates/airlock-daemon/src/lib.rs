@@ -334,14 +334,37 @@ pub async fn handle_connection(
         Some(m) => m,
         None => {
             let reason = format!("unknown command: {}", params.command);
-            deny_request(&mut writer, &logger, id, &profile_name, &params, start, -32601, reason).await?;
+            deny_request(
+                &mut writer,
+                &logger,
+                id,
+                &profile_name,
+                &params,
+                start,
+                -32601,
+                reason,
+            )
+            .await?;
             return Ok(());
         }
     };
 
     if let Some(denied) = module.check_deny(&params.args) {
-        let reason = format!("denied: '{}' not permitted for '{}'", denied, params.command);
-        deny_request(&mut writer, &logger, id, &profile_name, &params, start, -32600, reason).await?;
+        let reason = format!(
+            "denied: '{}' not permitted for '{}'",
+            denied, params.command
+        );
+        deny_request(
+            &mut writer,
+            &logger,
+            id,
+            &profile_name,
+            &params,
+            start,
+            -32600,
+            reason,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -349,8 +372,21 @@ pub async fn handle_connection(
         .get(&profile_name)
         .expect("profile must exist in map");
     if !profile.allows_command(&params.command) {
-        let reason = format!("command '{}' not permitted by profile '{}'", params.command, profile_name);
-        deny_request(&mut writer, &logger, id, &profile_name, &params, start, -32600, reason).await?;
+        let reason = format!(
+            "command '{}' not permitted by profile '{}'",
+            params.command, profile_name
+        );
+        deny_request(
+            &mut writer,
+            &logger,
+            id,
+            &profile_name,
+            &params,
+            start,
+            -32600,
+            reason,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -385,14 +421,37 @@ pub async fn handle_connection(
                 Some(m) => m,
                 None => {
                     let reason = format!("unknown command: {}", new_params.command);
-                    deny_request(&mut writer, &logger, new_id, &profile_name, &new_params, start, -32601, reason).await?;
+                    deny_request(
+                        &mut writer,
+                        &logger,
+                        new_id,
+                        &profile_name,
+                        &new_params,
+                        start,
+                        -32601,
+                        reason,
+                    )
+                    .await?;
                     return Ok(());
                 }
             };
 
             if let Some(denied) = new_module.check_deny(&new_params.args) {
-                let reason = format!("denied: '{}' not permitted for '{}'", denied, new_params.command);
-                deny_request(&mut writer, &logger, new_id, &profile_name, &new_params, start, -32600, reason).await?;
+                let reason = format!(
+                    "denied: '{}' not permitted for '{}'",
+                    denied, new_params.command
+                );
+                deny_request(
+                    &mut writer,
+                    &logger,
+                    new_id,
+                    &profile_name,
+                    &new_params,
+                    start,
+                    -32600,
+                    reason,
+                )
+                .await?;
                 return Ok(());
             }
 
@@ -401,7 +460,17 @@ pub async fn handle_connection(
             module = new_module;
         }
         PreExecResult::Rejected(msg) => {
-            deny_request(&mut writer, &logger, id, &profile_name, &params, start, -32600, msg).await?;
+            deny_request(
+                &mut writer,
+                &logger,
+                id,
+                &profile_name,
+                &params,
+                start,
+                -32600,
+                msg,
+            )
+            .await?;
             return Ok(());
         }
     }
@@ -411,7 +480,17 @@ pub async fn handle_connection(
             Some(path) => path,
             None => {
                 let reason = format!("cwd translation failed: docker inspect failed for container {cid} — is docker in the daemon's PATH?");
-                deny_request(&mut writer, &logger, id, &profile_name, &params, start, -32603, reason).await?;
+                deny_request(
+                    &mut writer,
+                    &logger,
+                    id,
+                    &profile_name,
+                    &params,
+                    start,
+                    -32603,
+                    reason,
+                )
+                .await?;
                 return Ok(());
             }
         },

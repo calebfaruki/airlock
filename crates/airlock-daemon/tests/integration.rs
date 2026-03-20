@@ -112,10 +112,7 @@ struct AnyResponse {
 fn assert_error_contains(lines: &[String], expected: &str) {
     let resp: AnyResponse = serde_json::from_str(&lines[0]).unwrap();
     assert!(resp.error.is_some(), "expected error response");
-    let message = resp.error.unwrap()["message"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let message = resp.error.unwrap()["message"].as_str().unwrap().to_string();
     assert!(
         message.contains(expected),
         "expected '{}' in: {}",

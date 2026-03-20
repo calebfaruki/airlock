@@ -321,7 +321,9 @@ async fn main() {
             return;
         }
         _ => {
-            eprintln!("usage: airlock-daemon <start|version|init|check|doctor|show|diff|eject|profile>");
+            eprintln!(
+                "usage: airlock-daemon <start|version|init|check|doctor|show|diff|eject|profile>"
+            );
             std::process::exit(1);
         }
     }

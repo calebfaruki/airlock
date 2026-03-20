@@ -1,3 +1,4 @@
+use crate::config::Config;
 use std::path::{Path, PathBuf};
 
 pub struct InitConfig {
@@ -36,6 +37,8 @@ pub fn run_init(config: &InitConfig) -> Result<(), Box<dyn std::error::Error>> {
     for dir in &created {
         println!("airlock: created {dir}");
     }
+
+    ensure_config(&config.config_dir)?;
 
     let result = install_service(config)?;
     match result {
@@ -83,6 +86,37 @@ pub fn run_uninstall(config: &InitConfig) -> Result<(), Box<dyn std::error::Erro
             "airlock: cleaned sockets in {}",
             config.sockets_dir.display()
         );
+    }
+
+    Ok(())
+}
+
+fn ensure_config(config_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let path = config_dir.join("config.toml");
+
+    if !path.exists() {
+        let content = "\
+# Uncomment and list the commands your agents need.\n\
+# Only listed commands will be available. Others return \"unknown command\".\n\
+# Built-in modules: git, terraform, aws, ssh, docker\n\
+# [commands]\n\
+# enable = [\"git\"]\n";
+        std::fs::write(&path, content)?;
+        println!(
+            "airlock: created config.toml — edit it to enable commands before starting the daemon"
+        );
+        return Ok(());
+    }
+
+    let app_config = Config::load(config_dir);
+    if app_config.commands.enable.is_none() {
+        println!("airlock: config.toml exists but has no [commands] section");
+        println!(
+            "airlock: the daemon now requires commands.enable — add this to config.toml:"
+        );
+        println!("airlock:");
+        println!("airlock:   [commands]");
+        println!("airlock:   enable = [\"git\"]");
     }
 
     Ok(())

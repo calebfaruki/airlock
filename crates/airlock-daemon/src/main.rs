@@ -4,7 +4,7 @@ use airlock_daemon::hooks::HookRunner;
 use airlock_daemon::logging::AuditLogger;
 use airlock_daemon::profile::Profile;
 use airlock_daemon::{bind_profile_socket, run_daemon, ConcurrencyLocks, MountCache, ProfileMap};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -392,10 +392,26 @@ async fn main() {
         app_config.log.max_files,
     ));
 
+    let enabled_commands: HashSet<String> = match &app_config.commands.enable {
+        Some(list) if list.is_empty() => {
+            eprintln!(
+                "airlock: commands.enable is empty — enable at least one command in config.toml"
+            );
+            std::process::exit(1);
+        }
+        Some(list) => list.iter().cloned().collect(),
+        None => {
+            eprintln!("airlock: no commands enabled — add [commands] enable = [\"git\"] to ~/.config/airlock/config.toml");
+            std::process::exit(1);
+        }
+    };
+
     let mount_cache: MountCache = Arc::new(RwLock::new(HashMap::new()));
-    let registry = load_registry();
+    let mut registry = CommandRegistry::new();
+    registry.load_builtins_filtered(&enabled_commands);
+    registry.load_user_overrides_filtered(&user_commands_dir(), &enabled_commands);
     eprintln!(
-        "airlock: loaded commands: {}",
+        "airlock: enabled commands: {}",
         registry.command_names().join(", ")
     );
     let overrides = registry.user_override_names();

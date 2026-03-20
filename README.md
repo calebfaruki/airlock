@@ -133,16 +133,37 @@ max_size_mb = 50
 max_files = 5
 ```
 
-## Built-in Commands
+## Enabling Commands
 
-Airlock ships with modules for: `git`, `terraform`, `aws`, `ssh`, `docker`. Each has conservative deny rules. Run `airlock-daemon show <command>` to see the active configuration.
+Command modules are opt-in. List the commands your agents need in `~/.config/airlock/config.toml`:
 
-Unknown commands are rejected. To add a new command, create a TOML file in `~/.config/airlock/commands/`:
+```toml
+[commands]
+enable = ["git", "terraform"]
+```
+
+The daemon exits on startup if `commands.enable` is missing or empty. Only enabled commands are loaded — requests for anything else return "unknown command".
+
+Airlock ships with built-in modules for: `git`, `terraform`, `aws`, `ssh`, `docker`. Each has conservative deny rules. Run `airlock-daemon show <command>` to see the active configuration.
+
+To add a custom command, create a TOML file in `~/.config/airlock/commands/` and add the name to `commands.enable`:
 
 ```toml
 [command]
 bin = "deploy-cli"
 ```
+
+### Three-Layer Security Model
+
+Three independent layers restrict what an agent can do:
+
+1. **Daemon module list** (`commands.enable`) — ceiling that no profile can exceed
+2. **Profile `commands` list** — per-container restriction within the ceiling
+3. **Deny rules** — per-module restriction on flags and arguments
+
+Each layer is independent. A mistake in one layer doesn't compromise the others.
+
+> **SSH requires extra caution.** SSH is remote code execution on external servers. See [`ssh/SECURITY.md`](crates/airlock-daemon/src/commands/builtins/ssh/SECURITY.md) before enabling it.
 
 ## Built-in Protections
 
@@ -155,8 +176,8 @@ Run `airlock-daemon show <command>` to see the active configuration. Run `airloc
 On startup, the daemon prints loaded commands and any user overrides to stderr:
 
 ```
-airlock: loaded commands: aws, docker, gh, git, ssh, terraform
-airlock: user overrides: gh
+airlock: enabled commands: git, terraform
+airlock: user overrides: git
 ```
 
 Run `airlock-daemon check` before restarting to catch TOML syntax errors and missing binaries early.
@@ -198,14 +219,18 @@ A profile cannot override security hardening set by a command module.
 
 The daemon requires at least one profile. If `~/.config/airlock/profiles/` is empty or missing, the daemon refuses to start.
 
-## Upgrading from v1
+## Upgrading
 
-v1 used a single shared socket. v2 requires profiles:
+### From v0.1.x
 
-1. Create at least one profile: `echo 'commands = []' > ~/.config/airlock/profiles/default.toml`
-2. Re-run `airlock init` to create the new directories
-3. Update `docker run` commands to mount the profile socket:
-   `-v ~/.config/airlock/sockets/default.sock:/run/docker-airlock.sock`
+v0.2.0 requires explicit command enablement. Add `[commands] enable` to `~/.config/airlock/config.toml`:
+
+```toml
+[commands]
+enable = ["git", "terraform"]
+```
+
+Or re-run `airlock init` — it will detect a missing `[commands]` section and print the required config.
 
 ## Security Model
 

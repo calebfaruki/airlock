@@ -162,7 +162,7 @@ No graceful shutdown logic. The process exits on SIGTERM. systemd/launchd handle
 
 ## Command Directory
 
-TOML file per command. Built-in modules are compiled into the binary and versioned with the daemon. User overrides live in `~/.config/airlock/commands/` and completely replace the built-in (full replace, no merging).
+TOML file per command. Built-in modules are compiled into the binary and versioned with the daemon. Modules are opt-in — only commands listed in `commands.enable` in `config.toml` are loaded at startup. User overrides live in `~/.config/airlock/commands/` and completely replace the built-in (full replace, no merging).
 
 ### TOML Schema
 
@@ -292,9 +292,12 @@ On version upgrade, `airlock init` updates the service definition but never touc
 
 ## Configuration
 
-Optional file at `~/.config/airlock/config.toml`. Only operational settings:
+File at `~/.config/airlock/config.toml`. The `[commands]` section is required — the daemon exits on startup if `commands.enable` is missing or empty.
 
 ```toml
+[commands]
+enable = ["git", "terraform"]
+
 [daemon]
 socket = "/var/run/docker-airlock.sock"
 log_level = "info"
@@ -305,13 +308,13 @@ max_size_mb = 50
 max_files = 5
 ```
 
-If no config file exists, the daemon uses built-in defaults. Most users never create this file.
+Only commands in `enable` are loaded. Requests for other commands return "unknown command" regardless of profile configuration. `airlock init` generates a starter config with a commented-out example.
 
 ## Directory Layout
 
 ```
 ~/.config/airlock/
-├── config.toml              # optional, operational settings only
+├── config.toml              # required — commands.enable list
 ├── profiles/
 │   ├── default.toml         # required — at least one profile
 │   └── agent-a.toml         # additional profile

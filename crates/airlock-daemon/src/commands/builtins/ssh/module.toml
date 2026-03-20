@@ -1,5 +1,25 @@
 [command]
 bin = "ssh"
 
+[deny]
+args = [
+    "-A",
+    "-L",
+    "-R",
+    "-D",
+    "-o",
+    "-F",
+    "-J",
+    "-W",
+    "-X",
+    "-Y",
+    "-E",
+    "-w",
+    "-O",
+]
+
+[env]
+strip = ["SSH_AUTH_SOCK"]
+
 [exec]
 concurrent = true

@@ -299,18 +299,21 @@ Checks external state that airlock depends on but does not control. Two categori
 
 Exit code 0 if no failures, 1 if any binary is missing.
 
-## `airlock why`
+## `airlock test`
 
-Dry-runs a command through the evaluation pipeline without executing it. Shows all four decision steps:
+Dry-runs a command through the evaluation pipeline without executing it. Two phases:
 
+**Phase 1 (static):** Walks the four decision steps using config and profile files on disk:
 1. **Command enabled?** — is the command in `commands.enable`?
 2. **Module found?** — built-in or user override? (informational, never denies independently)
 3. **Deny rules?** — normalized args evaluated against all deny rules
 4. **Profile allows?** — is the command in the profile's `commands` list?
 
-Usage: `airlock-daemon why <profile> <command> [args...]`
+**Phase 2 (live):** Connects to the daemon's socket and sends a `check` request. Confirms the daemon's decision matches the static analysis.
 
-Exit code 0 if allowed, 1 if denied.
+Usage: `airlock-daemon test <profile> <command> [args...]`
+
+Exit code 0 if allowed (and live agrees or skipped), 1 if denied or mismatch.
 
 ## Configuration
 

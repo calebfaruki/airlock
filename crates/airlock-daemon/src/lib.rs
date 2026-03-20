@@ -5,9 +5,9 @@ pub mod hooks;
 pub mod init;
 pub mod logging;
 pub mod profile;
-pub mod why;
+pub mod test;
 
-use commands::CommandRegistry;
+use commands::{CommandModule, CommandRegistry};
 use hooks::{HookRunner, PostExecResult, PreExecResult};
 use logging::{AuditLogger, LogEntry};
 use profile::Profile;
@@ -123,7 +123,7 @@ pub fn translate_path(mounts: &[DockerMount], container_cwd: &str) -> Option<Str
     })
 }
 
-pub fn validate_request(raw: &str) -> Result<(u64, ExecParams), ErrorResponse> {
+pub fn validate_request(raw: &str) -> Result<(u64, String, ExecParams), ErrorResponse> {
     let request: Request = serde_json::from_str(raw.trim()).map_err(|e| ErrorResponse {
         jsonrpc: "2.0",
         id: 0,
@@ -135,7 +135,7 @@ pub fn validate_request(raw: &str) -> Result<(u64, ExecParams), ErrorResponse> {
 
     let id = request.id.unwrap_or(0);
 
-    if request.jsonrpc != "2.0" || request.method != "exec" {
+    if request.jsonrpc != "2.0" || (request.method != "exec" && request.method != "check") {
         return Err(ErrorResponse {
             jsonrpc: "2.0",
             id,
@@ -155,7 +155,7 @@ pub fn validate_request(raw: &str) -> Result<(u64, ExecParams), ErrorResponse> {
         },
     })?;
 
-    Ok((id, params))
+    Ok((id, request.method, params))
 }
 
 pub fn build_error_response(id: u64, code: i32, message: String) -> ErrorResponse {
@@ -301,6 +301,50 @@ fn spawn_stream_forwarder(
     })
 }
 
+pub enum EvalDecision<'a> {
+    Allowed(&'a CommandModule),
+    Denied { code: i32, reason: String },
+}
+
+pub fn evaluate_request<'a>(
+    params: &ExecParams,
+    profile: &Profile,
+    profile_name: &str,
+    registry: &'a CommandRegistry,
+) -> EvalDecision<'a> {
+    let module = match registry.get(&params.command) {
+        Some(m) => m,
+        None => {
+            return EvalDecision::Denied {
+                code: -32601,
+                reason: format!("unknown command: {}", params.command),
+            };
+        }
+    };
+
+    if let Some(denied) = module.check_deny(&params.args) {
+        return EvalDecision::Denied {
+            code: -32600,
+            reason: format!(
+                "denied: '{}' not permitted for '{}'",
+                denied, params.command
+            ),
+        };
+    }
+
+    if !profile.allows_command(&params.command) {
+        return EvalDecision::Denied {
+            code: -32600,
+            reason: format!(
+                "command '{}' not permitted by profile '{}'",
+                params.command, profile_name
+            ),
+        };
+    }
+
+    EvalDecision::Allowed(module)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_connection(
     stream: tokio::net::UnixStream,
@@ -322,7 +366,7 @@ pub async fn handle_connection(
         return Ok(());
     }
 
-    let (mut id, mut params) = match validate_request(&line) {
+    let (mut id, method, mut params) = match validate_request(&line) {
         Ok(r) => r,
         Err(err) => {
             writer
@@ -332,10 +376,35 @@ pub async fn handle_connection(
         }
     };
 
-    let mut module = match registry.get(&params.command) {
-        Some(m) => m,
-        None => {
-            let reason = format!("unknown command: {}", params.command);
+    let profile = profiles
+        .get(&profile_name)
+        .expect("profile must exist in map");
+
+    // Handle check method: evaluate without execution, hooks, or logging
+    if method == "check" {
+        match evaluate_request(&params, profile, &profile_name, &registry) {
+            EvalDecision::Allowed(_) => {
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "decision": "allowed" }
+                });
+                writer.write_all(&send_line(&resp.to_string())).await?;
+            }
+            EvalDecision::Denied { code, reason } => {
+                let resp = build_error_response(id, code, reason);
+                writer
+                    .write_all(&send_line(&serde_json::to_string(&resp)?))
+                    .await?;
+            }
+        }
+        return Ok(());
+    }
+
+    // Exec path: evaluate, then continue to hooks and execution
+    let mut module = match evaluate_request(&params, profile, &profile_name, &registry) {
+        EvalDecision::Allowed(m) => m,
+        EvalDecision::Denied { code, reason } => {
             deny_request(
                 &mut writer,
                 &logger,
@@ -343,54 +412,13 @@ pub async fn handle_connection(
                 &profile_name,
                 &params,
                 start,
-                -32601,
+                code,
                 reason,
             )
             .await?;
             return Ok(());
         }
     };
-
-    if let Some(denied) = module.check_deny(&params.args) {
-        let reason = format!(
-            "denied: '{}' not permitted for '{}'",
-            denied, params.command
-        );
-        deny_request(
-            &mut writer,
-            &logger,
-            id,
-            &profile_name,
-            &params,
-            start,
-            -32600,
-            reason,
-        )
-        .await?;
-        return Ok(());
-    }
-
-    let profile = profiles
-        .get(&profile_name)
-        .expect("profile must exist in map");
-    if !profile.allows_command(&params.command) {
-        let reason = format!(
-            "command '{}' not permitted by profile '{}'",
-            params.command, profile_name
-        );
-        deny_request(
-            &mut writer,
-            &logger,
-            id,
-            &profile_name,
-            &params,
-            start,
-            -32600,
-            reason,
-        )
-        .await?;
-        return Ok(());
-    }
 
     // Pre-exec hook
     let request_value = serde_json::json!({
@@ -409,7 +437,7 @@ pub async fn handle_connection(
     match hook_runner.run_pre_exec(&request_json).await {
         PreExecResult::Proceed => {}
         PreExecResult::Modified(json) => {
-            let (new_id, new_params) = match validate_request(&json) {
+            let (new_id, _method, new_params) = match validate_request(&json) {
                 Ok(r) => r,
                 Err(err) => {
                     writer
@@ -419,10 +447,10 @@ pub async fn handle_connection(
                 }
             };
 
-            let new_module = match registry.get(&new_params.command) {
-                Some(m) => m,
-                None => {
-                    let reason = format!("unknown command: {}", new_params.command);
+            let new_module = match evaluate_request(&new_params, profile, &profile_name, &registry)
+            {
+                EvalDecision::Allowed(m) => m,
+                EvalDecision::Denied { code, reason } => {
                     deny_request(
                         &mut writer,
                         &logger,
@@ -430,32 +458,13 @@ pub async fn handle_connection(
                         &profile_name,
                         &new_params,
                         start,
-                        -32601,
+                        code,
                         reason,
                     )
                     .await?;
                     return Ok(());
                 }
             };
-
-            if let Some(denied) = new_module.check_deny(&new_params.args) {
-                let reason = format!(
-                    "denied: '{}' not permitted for '{}'",
-                    denied, new_params.command
-                );
-                deny_request(
-                    &mut writer,
-                    &logger,
-                    new_id,
-                    &profile_name,
-                    &new_params,
-                    start,
-                    -32600,
-                    reason,
-                )
-                .await?;
-                return Ok(());
-            }
 
             id = new_id;
             params = new_params;

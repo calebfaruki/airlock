@@ -4,7 +4,7 @@ use airlock_daemon::doctor;
 use airlock_daemon::hooks::HookRunner;
 use airlock_daemon::logging::AuditLogger;
 use airlock_daemon::profile::Profile;
-use airlock_daemon::why;
+use airlock_daemon::test;
 use airlock_daemon::{bind_profile_socket, run_daemon, ConcurrencyLocks, MountCache, ProfileMap};
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -280,18 +280,18 @@ async fn main() {
             }
             return;
         }
-        "why" => {
+        "test" => {
             let profile_name = match args.get(2) {
                 Some(p) => p,
                 None => {
-                    eprintln!("usage: airlock-daemon why <profile> <command> [args...]");
+                    eprintln!("usage: airlock-daemon test <profile> <command> [args...]");
                     std::process::exit(1);
                 }
             };
             let command = match args.get(3) {
                 Some(c) => c,
                 None => {
-                    eprintln!("usage: airlock-daemon why <profile> <command> [args...]");
+                    eprintln!("usage: airlock-daemon test <profile> <command> [args...]");
                     std::process::exit(1);
                 }
             };
@@ -319,7 +319,7 @@ async fn main() {
                 }
             };
 
-            let result = why::evaluate(
+            let result = test::evaluate(
                 profile_name,
                 &profile,
                 command,
@@ -328,12 +328,25 @@ async fn main() {
                 &registry,
                 &hooks_dir(),
             );
-            why::print_result(&result);
+            test::print_result(&result);
 
-            if result.outcome != "ALLOWED" {
-                std::process::exit(1);
-            }
-            return;
+            let static_allowed = result.outcome == "ALLOWED";
+            eprintln!();
+            let live = test::check_live(
+                profile_name,
+                command,
+                &cmd_args,
+                &sockets_dir(),
+                static_allowed,
+            );
+            test::print_live_result(&live);
+
+            let exit_code = match (&live, static_allowed) {
+                (test::LiveResult::Mismatch { .. }, _) => 1,
+                (_, false) => 1,
+                _ => 0,
+            };
+            std::process::exit(exit_code);
         }
         "profile" => {
             let sub = args.get(2).map(|s| s.as_str()).unwrap_or("help");

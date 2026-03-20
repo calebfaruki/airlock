@@ -754,6 +754,92 @@ mod audit_log {
     }
 }
 
+mod check_method {
+    use super::*;
+
+    #[tokio::test]
+    async fn check_allowed_returns_decision() {
+        let sock = test_socket_path("check-allowed");
+        let _handle = start_daemon(&sock).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"check","params":{"command":"git","args":["status"]}}"#;
+        let lines = send_and_collect(&sock, request).await;
+
+        assert_eq!(lines.len(), 1, "check should return exactly one response");
+        let resp: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(resp["result"]["decision"], "allowed");
+        assert!(resp.get("error").is_none());
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn check_denied_returns_error() {
+        let sock = test_socket_path("check-denied");
+        let _handle = start_daemon(&sock).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"check","params":{"command":"git","args":["-cevil","status"]}}"#;
+        let lines = send_and_collect(&sock, request).await;
+
+        assert_eq!(lines.len(), 1, "check should return exactly one response");
+        let resp: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        assert!(resp.get("error").is_some());
+        let message = resp["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("denied"),
+            "expected 'denied' in: {message}"
+        );
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn check_produces_no_output_notifications() {
+        let sock = test_socket_path("check-no-output");
+        let _handle = start_daemon(&sock).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"check","params":{"command":"git","args":["status"]}}"#;
+        let lines = send_and_collect(&sock, request).await;
+
+        for line in &lines {
+            let resp: AnyResponse = serde_json::from_str(line).unwrap();
+            assert!(
+                resp.method.as_deref() != Some("output"),
+                "check should not produce output notifications"
+            );
+        }
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn check_does_not_write_audit_log() {
+        let sock = test_socket_path("check-no-log");
+        let log_path = unique_log_path();
+        let _handle = start_daemon_with_hooks(&sock, &unique_hooks_dir(), &log_path).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"check","params":{"command":"git","args":["status"]}}"#;
+        let _ = send_and_collect(&sock, request).await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let log_exists = log_path.exists();
+        if log_exists {
+            let content = std::fs::read_to_string(&log_path).unwrap();
+            assert!(
+                content.is_empty(),
+                "check should not write to audit log, got: {content}"
+            );
+        }
+
+        let _ = std::fs::remove_file(&sock);
+    }
+}
+
 mod opt_in_modules {
     use super::*;
 

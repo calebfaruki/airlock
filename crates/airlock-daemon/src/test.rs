@@ -2,6 +2,7 @@ use crate::commands::deny::NormalizedArg;
 use crate::commands::CommandRegistry;
 use crate::profile::Profile;
 use std::collections::HashSet;
+use std::io::{BufRead, Write};
 use std::path::Path;
 
 pub enum StepResult {
@@ -175,7 +176,100 @@ pub fn print_result(result: &WhyResult) {
 
     if result.hook_notice {
         eprintln!();
-        eprintln!("  note: pre-exec hook configured but not evaluated by `why`");
+        eprintln!("  note: pre-exec hook configured but not evaluated");
+    }
+}
+
+pub enum LiveResult {
+    Agree(bool),
+    Mismatch {
+        static_says: String,
+        daemon_says: String,
+    },
+    Skipped(String),
+}
+
+pub fn check_live(
+    profile_name: &str,
+    command: &str,
+    args: &[String],
+    sockets_dir: &Path,
+    static_allowed: bool,
+) -> LiveResult {
+    let sock_path = sockets_dir.join(format!("{profile_name}.sock"));
+    let stream = match std::os::unix::net::UnixStream::connect(&sock_path) {
+        Ok(s) => s,
+        Err(_) => {
+            return LiveResult::Skipped(format!("could not connect to {}", sock_path.display()));
+        }
+    };
+
+    let args_json: Vec<String> = args.iter().map(|a| format!("{a:?}")).collect();
+    let request = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"check","params":{{"command":"{command}","args":[{}]}}}}"#,
+        args_json.join(",")
+    );
+
+    let mut writer = std::io::BufWriter::new(&stream);
+    if writer.write_all(format!("{request}\n").as_bytes()).is_err() {
+        return LiveResult::Skipped("failed to send request".to_string());
+    }
+    if writer.flush().is_err() {
+        return LiveResult::Skipped("failed to flush request".to_string());
+    }
+    // Shut down write half so daemon knows we're done
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+
+    let reader = std::io::BufReader::new(&stream);
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => break,
+        };
+        let parsed: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        // Look for the final response (has an "id" field)
+        if parsed.get("id").is_none() {
+            continue;
+        }
+        let daemon_allowed = parsed.get("result").is_some();
+        if daemon_allowed == static_allowed {
+            return LiveResult::Agree(!static_allowed);
+        }
+        let static_says = if static_allowed { "ALLOWED" } else { "DENIED" };
+        let daemon_says = if daemon_allowed { "ALLOWED" } else { "DENIED" };
+        return LiveResult::Mismatch {
+            static_says: static_says.to_string(),
+            daemon_says: daemon_says.to_string(),
+        };
+    }
+
+    LiveResult::Skipped("no response from daemon".to_string())
+}
+
+pub fn print_live_result(result: &LiveResult) {
+    match result {
+        LiveResult::Agree(was_denied) => {
+            if *was_denied {
+                eprintln!("  live: ok -- daemon agrees (denied)");
+            } else {
+                eprintln!("  live: ok -- daemon agrees");
+            }
+        }
+        LiveResult::Mismatch {
+            static_says,
+            daemon_says,
+        } => {
+            eprintln!("  live: MISMATCH -- static says {static_says}, daemon says {daemon_says}");
+            eprintln!(
+                "        (daemon may be running with different config -- restart to pick up changes)"
+            );
+        }
+        LiveResult::Skipped(reason) => {
+            eprintln!("  live: skipped -- {reason}");
+        }
     }
 }
 

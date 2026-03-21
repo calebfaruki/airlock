@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Airlock — Credential isolation for AI coding agents</title>
+  <meta name="description" content="Credential isolation for CLI tools in Docker containers. Proxy git, aws, terraform, and other commands without mounting secrets into the container.">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace'],
+          }
+        }
+      }
+    }
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <style>
+    /* Box-drawing characters need line-height: 1 to connect vertically */
+    pre.diagram { line-height: 1; }
+  </style>
+</head>
+<body class="bg-black text-white font-mono antialiased">
+
+  <div class="mx-auto max-w-4xl px-4 sm:px-6 lg:px-8 py-12">
+
+    <!-- Hero -->
+    <section class="mb-20">
+      <pre class="text-white text-sm sm:text-base mb-8 select-none" style="line-height:1.1" aria-label="AIRLOCK">░█▀▀█ ▀█▀ ░█▀▀█ ░█    ░█▀▀▀█ ░█▀▀▀ ░█ ▄▀
+░█▀▀█ ░█  ░█▄▄▀ ░█    ░█  ░█ ░█    ░█▀▄
+░█ ░█ ▄█▄ ░█ ░█ ░█▄▄▄ ░█▄▄▄█ ░█▄▄▄ ░█ ░█</pre>
+
+      <p class="text-lg sm:text-xl font-medium text-gray-300 mb-3">
+        Credential isolation for AI coding agents.
+      </p>
+      <p class="text-sm text-gray-500 mb-8 leading-relaxed">
+        Give agents access to CLI commands without exposing credentials. Commands proxy from a container-side shim to a host-side daemon. The container never holds a secret.
+      </p>
+
+      <div class="relative group mb-6">
+        <pre class="bg-zinc-900 border border-white/10 px-4 py-3 text-sm overflow-x-auto"><code id="install-cmd">curl -fsSL https://raw.githubusercontent.com/calebfaruki/airlock/main/install.sh | sh</code></pre>
+        <button onclick="navigator.clipboard.writeText(document.getElementById('install-cmd').textContent).then(()=>{this.textContent='copied';setTimeout(()=>this.textContent='copy',1500)})"
+          class="absolute top-2 right-2 text-xs text-gray-500 hover:text-white border border-white/10 px-2 py-1 transition-colors">copy</button>
+      </div>
+
+      <a href="https://github.com/calebfaruki/airlock" class="text-sm text-gray-500 hover:text-white transition-colors">github.com/calebfaruki/airlock</a>
+    </section>
+
+    <!-- The problem -->
+    <section class="mb-20">
+      <h2 class="border-b border-white/20 text-lg font-medium mb-6">The problem</h2>
+
+      <pre class="bg-zinc-900 border border-white/10 px-4 py-4 text-sm overflow-x-auto text-gray-400 leading-relaxed mb-8"><span class="text-gray-600"># "Just pass the key as an env var"</span>
+docker run -e SSH_PRIVATE_KEY="$(cat ~/.ssh/id_ed25519)" agent-image
+
+<span class="text-gray-600"># "Just inject the creds"</span>
+docker run -e AWS_ACCESS_KEY_ID=AKIA... -e AWS_SECRET_ACCESS_KEY=... agent-image
+
+<span class="text-gray-600"># "Just set the token"</span>
+docker run -e GITHUB_TOKEN=$GITHUB_TOKEN agent-image</pre>
+
+      <p class="text-sm text-gray-400 leading-relaxed">
+        Your credentials are environment variables inside the container. The agent can read them, exfiltrate them, and use them for anything. No scoping. No audit trail. No deny rules.
+      </p>
+    </section>
+
+    <!-- The solution -->
+    <section class="mb-20">
+      <h2 class="border-b border-white/20 text-lg font-medium mb-6">The solution</h2>
+
+      <p class="text-sm text-gray-300 mb-8">
+        Containers never hold secrets. A host-side daemon proxies CLI tools over a unix socket.
+      </p>
+
+      <div class="grid sm:grid-cols-2 gap-0 mb-8 text-sm">
+        <div class="border border-white/10 bg-zinc-900 px-5 py-4">
+          <div class="text-gray-300 font-medium mb-3">Container</div>
+          <div class="text-gray-500 space-y-1">
+            <div>agent runs <span class="text-gray-400">git push</span></div>
+            <div class="text-gray-600 pl-4">&darr;</div>
+            <div>airlock shim intercepts</div>
+            <div class="text-gray-600 pl-4">&darr;</div>
+            <div>sent over unix socket</div>
+          </div>
+        </div>
+        <div class="border border-white/10 sm:border-l-0 bg-zinc-900 px-5 py-4">
+          <div class="text-gray-300 font-medium mb-3">Host</div>
+          <div class="text-gray-500 space-y-1">
+            <div>airlock daemon receives from socket</div>
+            <div class="text-gray-600 pl-4">&darr;</div>
+            <div>deny rules checked</div>
+            <div class="text-gray-600 pl-4">&darr;</div>
+            <div><span class="text-gray-400">git push</span> with real keys</div>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- The complexity argument -->
+    <section class="mb-20">
+      <h2 class="border-b border-white/20 text-lg font-medium mb-6">Different layers for different problems</h2>
+
+      <p class="text-sm text-gray-400 mb-8 leading-relaxed">
+        Docker Sandboxes and NemoClaw protect HTTP API keys &mdash; they intercept outbound requests and inject credentials. But many tools don't authenticate over HTTP. Git uses SSH keys. Terraform reads credential files. kubectl uses kubeconfig. These are files on your machine, not HTTP headers. No network proxy can intercept that.
+      </p>
+
+      <div class="grid sm:grid-cols-2 gap-8">
+        <div>
+          <h3 class="text-sm font-medium text-gray-300 mb-3">HTTP proxies</h3>
+          <ul class="space-y-2 text-sm text-gray-500">
+            <li>Miss filesystem credentials (git, ssh, terraform, kubectl)</li>
+            <li>Another service to run, configure, update, debug</li>
+            <li>MCP servers are non-deterministic</li>
+            <li>Complexity is the enemy of security</li>
+          </ul>
+        </div>
+        <div>
+          <h3 class="text-sm font-medium text-gray-300 mb-3">Airlock</h3>
+          <ul class="space-y-2 text-sm text-gray-400">
+            <li>Static binary, TOML config</li>
+            <li>Deterministic allowlists</li>
+            <li>CLI tools live on your machine, not someone else's server</li>
+            <li>Fewer moving parts means fewer things to break</li>
+          </ul>
+        </div>
+      </div>
+
+      <p class="text-xs text-gray-600 mt-6">
+        Use HTTP proxies for API keys. Use airlock for everything else.
+      </p>
+    </section>
+
+    <!-- Three-layer security model -->
+    <section class="mb-20">
+      <h2 class="border-b border-white/20 text-lg font-medium mb-6">Three-layer security model</h2>
+
+      <div class="space-y-6">
+        <div class="border border-white/10 px-4 py-3">
+          <div class="text-sm font-medium text-gray-300 mb-1">Layer 1: Daemon</div>
+          <p class="text-sm text-gray-500">Only enabled commands load. Others don't exist.</p>
+        </div>
+        <div class="border border-white/10 px-4 py-3 ml-4">
+          <div class="text-sm font-medium text-gray-300 mb-1">Layer 2: Profiles</div>
+          <p class="text-sm text-gray-500">Each container scoped to specific commands and credentials.</p>
+        </div>
+        <div class="border border-white/10 px-4 py-3 ml-8">
+          <div class="text-sm font-medium text-gray-300 mb-1">Layer 3: Deny rules</div>
+          <p class="text-sm text-gray-500">Per-tool flag and arg restrictions. Normalized matching. Glob patterns.</p>
+        </div>
+      </div>
+
+      <p class="text-xs text-gray-600 mt-6">
+        Each layer is independent. A mistake in one doesn't compromise the others.
+      </p>
+
+      <p class="text-xs text-gray-600 mt-4">
+        Pre-exec and post-exec hooks are escape hatches for everything else. Restrict destinations, redact output, enforce approval workflows &mdash; whatever airlock's built-in rules can't express.
+      </p>
+    </section>
+
+    <!-- Why agents shouldn't hold secrets -->
+    <section class="mb-20">
+      <h2 class="border-b border-white/20 text-lg font-medium mb-6">Agents can be tricked into using your credentials against you</h2>
+
+      <p class="text-sm text-gray-400 mb-8 leading-relaxed">
+        AI agents follow instructions from content they process. They can't reliably tell your instructions apart from malicious ones. A prompt injection in a README, a commit message, or an API response can hijack the agent and make it act with your full credentials. The only way to prevent this is to never give the agent credentials in the first place.
+      </p>
+
+      <div class="grid sm:grid-cols-3 gap-5 mb-8">
+        <div class="border border-white/10 px-4 py-4">
+          <div class="text-sm font-medium text-gray-300 mb-2">The agent can't leak what it doesn't have</div>
+          <p class="text-xs text-gray-500 leading-relaxed">
+            Credentials live on the host, never inside the container. Even a fully compromised agent &mdash; prompt-injected, jailbroken, running malicious code &mdash; cannot access keys that don't exist in its environment.
+          </p>
+        </div>
+        <div class="border border-white/10 px-4 py-4">
+          <div class="text-sm font-medium text-gray-300 mb-2">Dangerous commands are blocked deterministically</div>
+          <p class="text-xs text-gray-500 leading-relaxed">
+            If the agent is tricked into running <code class="text-gray-400">terraform destroy</code> or <code class="text-gray-400">docker run --privileged</code>, deny rules reject it before execution. No model judgment involved. The rule either matches or it doesn't.
+          </p>
+        </div>
+        <div class="border border-white/10 px-4 py-4">
+          <div class="text-sm font-medium text-gray-300 mb-2">Each agent gets only the tools it needs</div>
+          <p class="text-xs text-gray-500 leading-relaxed">
+            An agent that only needs git shouldn't have access to terraform, aws, or ssh. Airlock enforces this at the daemon level. Tools the agent doesn't need simply don't exist.
+          </p>
+        </div>
+      </div>
+
+      <p class="text-xs text-gray-600 leading-relaxed">
+        Maps to <a href="https://genai.owasp.org" class="underline hover:text-white transition-colors">OWASP Gen AI Top 10</a> risks LLM02, LLM05, and LLM06. Airlock operates at the tool layer &mdash; model-layer risks require model-layer mitigations.
+      </p>
+    </section>
+
+    <!-- Quick start -->
+    <section class="mb-20">
+      <h2 class="border-b border-white/20 text-lg font-medium mb-6">Quick start</h2>
+
+      <pre class="bg-zinc-900 border border-white/10 px-4 py-4 text-sm overflow-x-auto text-gray-400 leading-relaxed"><span class="text-gray-600"># Install</span>
+curl -fsSL https://raw.githubusercontent.com/calebfaruki/airlock/main/install.sh | sh
+
+<span class="text-gray-600"># Enable commands</span>
+cat > ~/.config/airlock/config.toml &lt;&lt; 'EOF'
+[commands]
+enable = ["git", "terraform"]
+EOF
+
+<span class="text-gray-600"># Create a profile</span>
+cat > ~/.config/airlock/profiles/default.toml &lt;&lt; 'EOF'
+commands = ["git", "terraform"]
+
+[env]
+set = { AWS_PROFILE = "readonly" }
+EOF
+
+<span class="text-gray-600"># Run your container</span>
+docker run \
+  -v ~/.config/airlock/sockets/default.sock:/run/docker-airlock.sock \
+  your-agent-image</pre>
+    </section>
+
+    <!-- Commands -->
+    <section class="mb-20">
+      <h2 class="border-b border-white/20 text-lg font-medium mb-6">Secure defaults. Eject to customize.</h2>
+
+      <p class="text-sm text-gray-400 mb-6 leading-relaxed">
+        Each command is a TOML file defining deny rules, environment hardening, and execution constraints. Start with the built-ins. Need more or less security? Run <code class="text-gray-300">airlock eject &lt;command&gt;</code> to get a copy you can edit. Need a command we don't ship? Create a TOML file and add it to your enable list.
+      </p>
+
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm text-left">
+          <thead>
+            <tr class="border-b border-white/10 text-gray-500">
+              <th class="py-2 pr-4 font-medium">Command</th>
+              <th class="py-2 font-medium">What the built-in blocks</th>
+            </tr>
+          </thead>
+          <tbody class="text-gray-400">
+            <tr class="border-b border-white/5">
+              <td class="py-3 pr-4 text-gray-300">git</td>
+              <td class="py-3 text-xs">Config injection, hook execution, credential subcommands, upload-pack</td>
+            </tr>
+            <tr class="border-b border-white/5">
+              <td class="py-3 pr-4 text-gray-300">terraform</td>
+              <td class="py-3 text-xs">destroy, apply -auto-approve (sequence deny), force-unlock</td>
+            </tr>
+            <tr class="border-b border-white/5">
+              <td class="py-3 pr-4 text-gray-300">aws</td>
+              <td class="py-3 text-xs">terminate-instances, delete-db-instance, and other destructive operations</td>
+            </tr>
+            <tr class="border-b border-white/5">
+              <td class="py-3 pr-4 text-gray-300">docker</td>
+              <td class="py-3 text-xs">Root volume mounts, socket mounts, namespace escapes, capability grants</td>
+            </tr>
+            <tr>
+              <td class="py-3 pr-4 text-gray-300">ssh</td>
+              <td class="py-3 text-xs">Port forwarding, agent forwarding, tunneling, config overrides</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="border-t border-white/10 pt-6 pb-12 flex flex-wrap items-center gap-4 text-xs text-gray-600">
+      <a href="https://github.com/calebfaruki/airlock" class="hover:text-white transition-colors">GitHub</a>
+      <a href="https://api.securityscorecards.dev/projects/github.com/calebfaruki/airlock/badge" class="hover:text-white transition-colors">
+        <img src="https://api.securityscorecards.dev/projects/github.com/calebfaruki/airlock/badge" alt="OpenSSF Scorecard" class="h-5 inline">
+      </a>
+      <span>AGPL-3.0</span>
+    </footer>
+
+  </div>
+
+</body>
+</html>

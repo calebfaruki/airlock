@@ -969,9 +969,7 @@ args = ["-v=/*[:*"]
         let module =
             crate::commands::CommandModule::parse(include_str!("builtins/docker/module.toml"))
                 .unwrap();
-        assert!(module
-            .check_deny(&args(&["run", "--privileged"]))
-            .is_some());
+        assert!(module.check_deny(&args(&["run", "--privileged"])).is_some());
         assert!(module
             .check_deny(&args(&["run", "-v", "/:/host"]))
             .is_some());

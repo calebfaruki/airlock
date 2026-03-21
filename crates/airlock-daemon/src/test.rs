@@ -135,7 +135,8 @@ fn format_normalized(normalized: &[NormalizedArg]) -> String {
                 Some(f) => format!("flag={f:?}"),
                 None => "flag=none".to_string(),
             };
-            format!("({:?}, {flag})", na.raw)
+            let role = format!("{:?}", na.role);
+            format!("({:?}, {flag}, {role})", na.raw)
         })
         .collect();
     format!("[{}]", parts.join(", "))

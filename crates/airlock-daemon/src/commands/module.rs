@@ -94,8 +94,9 @@ impl CommandModule {
                     if let Some(ref flag) = na.flag {
                         if reason.contains(flag) {
                             matched_detail = Some(format!(
-                                "arg {:?} normalized to flag={:?}, value={:?}",
+                                "arg {:?} role={:?}, flag={:?}, value={:?}",
                                 na.raw,
+                                na.role,
                                 flag,
                                 na.value.as_deref().unwrap_or("(none)")
                             ));
@@ -103,7 +104,10 @@ impl CommandModule {
                         }
                     }
                     if reason == na.raw {
-                        matched_detail = Some(format!("arg {:?} matched as literal", na.raw));
+                        matched_detail = Some(format!(
+                            "arg {:?} role={:?}, matched as literal",
+                            na.raw, na.role
+                        ));
                         break;
                     }
                 }

@@ -1,10 +1,18 @@
 use globset::{Glob, GlobMatcher};
 
+#[derive(Debug, PartialEq, Clone)]
+pub enum ArgRole {
+    Positional,
+    Flag,
+    MaybeValue,
+}
+
 #[derive(Debug, PartialEq)]
 pub struct NormalizedArg {
     pub raw: String,
     pub flag: Option<String>,
     pub value: Option<String>,
+    pub role: ArgRole,
 }
 
 #[derive(Debug, Clone)]
@@ -52,14 +60,19 @@ impl DenyRule {
     pub fn matches(&self, normalized: &[NormalizedArg]) -> Option<String> {
         match self {
             DenyRule::Arg(pattern) => {
+                let pattern_is_flag = pattern.starts_with('-');
                 for n in normalized {
-                    if n.raw == *pattern {
-                        return Some(pattern.clone());
-                    }
-                    if let Some(ref flag) = n.flag {
-                        if flag == pattern {
+                    if pattern_is_flag {
+                        if n.raw == *pattern {
                             return Some(pattern.clone());
                         }
+                        if let Some(ref flag) = n.flag {
+                            if flag == pattern {
+                                return Some(pattern.clone());
+                            }
+                        }
+                    } else if n.role == ArgRole::Positional && n.raw == *pattern {
+                        return Some(pattern.clone());
                     }
                 }
                 None
@@ -129,21 +142,30 @@ pub fn normalize_args(args: &[String]) -> Vec<NormalizedArg> {
     for arg in args {
         if arg == "--" {
             options_ended = true;
+        }
+        if options_ended {
             result.push(NormalizedArg {
                 raw: arg.clone(),
                 flag: None,
                 value: None,
-            });
-        } else if options_ended {
-            result.push(NormalizedArg {
-                raw: arg.clone(),
-                flag: None,
-                value: None,
+                role: ArgRole::Positional,
             });
         } else {
             result.push(normalize_one(arg));
         }
     }
+
+    // Reclassify: non-flag args following a valueless flag become MaybeValue
+    for i in 1..result.len() {
+        if result[i].flag.is_none()
+            && result[i].raw != "--"
+            && result[i - 1].flag.is_some()
+            && result[i - 1].value.is_none()
+        {
+            result[i].role = ArgRole::MaybeValue;
+        }
+    }
+
     result
 }
 
@@ -154,6 +176,7 @@ fn normalize_one(arg: &str) -> NormalizedArg {
                 raw: arg.to_string(),
                 flag: None,
                 value: None,
+                role: ArgRole::Positional,
             };
         }
         if let Some(eq_pos) = rest.find('=') {
@@ -163,12 +186,14 @@ fn normalize_one(arg: &str) -> NormalizedArg {
                 raw: arg.to_string(),
                 flag: Some(flag),
                 value: Some(value),
+                role: ArgRole::Flag,
             }
         } else {
             NormalizedArg {
                 raw: arg.to_string(),
                 flag: Some(arg.to_string()),
                 value: None,
+                role: ArgRole::Flag,
             }
         }
     } else if let Some(rest) = arg.strip_prefix('-') {
@@ -177,6 +202,7 @@ fn normalize_one(arg: &str) -> NormalizedArg {
                 raw: arg.to_string(),
                 flag: None,
                 value: None,
+                role: ArgRole::Positional,
             };
         }
         let mut chars = rest.chars();
@@ -188,12 +214,14 @@ fn normalize_one(arg: &str) -> NormalizedArg {
                 raw: arg.to_string(),
                 flag: Some(flag),
                 value: None,
+                role: ArgRole::Flag,
             }
         } else {
             NormalizedArg {
                 raw: arg.to_string(),
                 flag: Some(flag),
                 value: Some(remainder),
+                role: ArgRole::Flag,
             }
         }
     } else {
@@ -201,6 +229,7 @@ fn normalize_one(arg: &str) -> NormalizedArg {
             raw: arg.to_string(),
             flag: None,
             value: None,
+            role: ArgRole::Positional,
         }
     }
 }
@@ -227,6 +256,7 @@ mod tests {
                 raw: "--config=evil".into(),
                 flag: Some("--config".into()),
                 value: Some("evil".into()),
+                role: ArgRole::Flag,
             }
         );
     }
@@ -239,6 +269,7 @@ mod tests {
                 raw: "--verbose".into(),
                 flag: Some("--verbose".into()),
                 value: None,
+                role: ArgRole::Flag,
             }
         );
     }
@@ -251,6 +282,7 @@ mod tests {
                 raw: "-c".into(),
                 flag: Some("-c".into()),
                 value: None,
+                role: ArgRole::Flag,
             }
         );
     }
@@ -263,6 +295,7 @@ mod tests {
                 raw: "-cevil".into(),
                 flag: Some("-c".into()),
                 value: Some("evil".into()),
+                role: ArgRole::Flag,
             }
         );
     }
@@ -275,6 +308,7 @@ mod tests {
                 raw: "--".into(),
                 flag: None,
                 value: None,
+                role: ArgRole::Positional,
             }
         );
     }
@@ -287,6 +321,7 @@ mod tests {
                 raw: "-".into(),
                 flag: None,
                 value: None,
+                role: ArgRole::Positional,
             }
         );
     }
@@ -299,6 +334,7 @@ mod tests {
                 raw: "status".into(),
                 flag: None,
                 value: None,
+                role: ArgRole::Positional,
             }
         );
     }
@@ -311,6 +347,7 @@ mod tests {
                 raw: "".into(),
                 flag: None,
                 value: None,
+                role: ArgRole::Positional,
             }
         );
     }
@@ -323,6 +360,7 @@ mod tests {
                 raw: "--config=".into(),
                 flag: Some("--config".into()),
                 value: Some("".into()),
+                role: ArgRole::Flag,
             }
         );
     }
@@ -335,6 +373,7 @@ mod tests {
                 raw: "--config=key=value".into(),
                 flag: Some("--config".into()),
                 value: Some("key=value".into()),
+                role: ArgRole::Flag,
             }
         );
     }
@@ -353,6 +392,7 @@ mod tests {
         let n = norm("--émoji=🎉");
         assert_eq!(n.flag, Some("--émoji".into()));
         assert_eq!(n.value, Some("🎉".into()));
+        assert_eq!(n.role, ArgRole::Flag);
     }
 
     fn flag_value(flag: &str, pattern: &str) -> DenyRule {
@@ -735,6 +775,20 @@ args = ["-v=/*[:*"]
             let dd_pos = normalized.iter().position(|n| n.raw == "--").unwrap();
             for n in &normalized[dd_pos + 1..] {
                 prop_assert_eq!(&n.flag, &None, "args after -- should have no flag");
+                prop_assert_eq!(&n.role, &ArgRole::Positional, "args after -- should be Positional");
+            }
+        }
+
+        #[test]
+        fn maybe_value_only_after_valueless_flag(args in prop::collection::vec(arb_arg(), 1..20)) {
+            let normalized = normalize_args(&args);
+            for (i, n) in normalized.iter().enumerate() {
+                if n.role == ArgRole::MaybeValue {
+                    prop_assert!(i > 0, "MaybeValue cannot be first arg");
+                    let prev = &normalized[i - 1];
+                    prop_assert!(prev.flag.is_some(), "MaybeValue must follow a flag");
+                    prop_assert!(prev.value.is_none(), "MaybeValue must follow a valueless flag");
+                }
             }
         }
 
@@ -758,6 +812,179 @@ args = ["-v=/*[:*"]
                     "other entries should be Arg");
             }
         }
+    }
+
+    // --- Role classification tests ---
+
+    #[test]
+    fn role_leading_positionals() {
+        let normalized = normalize_args(&args(&["s3", "ls", "--recursive"]));
+        assert_eq!(normalized[0].role, ArgRole::Positional);
+        assert_eq!(normalized[1].role, ArgRole::Positional);
+        assert_eq!(normalized[2].role, ArgRole::Flag);
+    }
+
+    #[test]
+    fn role_flag_value_after_valueless_flag() {
+        let normalized = normalize_args(&args(&["--output", "s3", "iam"]));
+        assert_eq!(normalized[0].role, ArgRole::Flag);
+        assert_eq!(normalized[1].role, ArgRole::MaybeValue);
+        assert_eq!(normalized[2].role, ArgRole::Positional);
+    }
+
+    #[test]
+    fn role_attached_value_does_not_consume_next() {
+        let normalized = normalize_args(&args(&["--output=json", "s3", "ls"]));
+        assert_eq!(normalized[0].role, ArgRole::Flag);
+        assert_eq!(normalized[1].role, ArgRole::Positional);
+        assert_eq!(normalized[2].role, ArgRole::Positional);
+    }
+
+    #[test]
+    fn role_short_flag_no_attached_value() {
+        let normalized = normalize_args(&args(&["-o", "json", "s3"]));
+        assert_eq!(normalized[0].role, ArgRole::Flag);
+        assert_eq!(normalized[1].role, ArgRole::MaybeValue);
+        assert_eq!(normalized[2].role, ArgRole::Positional);
+    }
+
+    #[test]
+    fn role_short_flag_with_attached_value() {
+        let normalized = normalize_args(&args(&["-ojson", "s3"]));
+        assert_eq!(normalized[0].role, ArgRole::Flag);
+        assert_eq!(normalized[1].role, ArgRole::Positional);
+    }
+
+    #[test]
+    fn role_after_double_dash_all_positional() {
+        let normalized = normalize_args(&args(&["cmd", "--", "--flag-looking", "value"]));
+        assert_eq!(normalized[0].role, ArgRole::Positional);
+        assert_eq!(normalized[1].role, ArgRole::Positional);
+        assert_eq!(normalized[2].role, ArgRole::Positional);
+        assert_eq!(normalized[3].role, ArgRole::Positional);
+    }
+
+    #[test]
+    fn role_double_dash_not_consumed_as_value() {
+        let normalized = normalize_args(&args(&["--output", "--", "positional"]));
+        assert_eq!(normalized[0].role, ArgRole::Flag);
+        assert_eq!(normalized[1].role, ArgRole::Positional);
+        assert_eq!(normalized[2].role, ArgRole::Positional);
+    }
+
+    #[test]
+    fn role_consecutive_flags() {
+        let normalized = normalize_args(&args(&["--verbose", "--force", "target"]));
+        assert_eq!(normalized[0].role, ArgRole::Flag);
+        assert_eq!(normalized[1].role, ArgRole::Flag);
+        assert_eq!(normalized[2].role, ArgRole::MaybeValue);
+    }
+
+    #[test]
+    fn role_maybe_value_followed_by_positional() {
+        let normalized = normalize_args(&args(&["-C", "/path", "push"]));
+        assert_eq!(normalized[0].role, ArgRole::Flag);
+        assert_eq!(normalized[1].role, ArgRole::MaybeValue);
+        assert_eq!(normalized[2].role, ArgRole::Positional);
+    }
+
+    // --- Position-aware matching tests ---
+
+    #[test]
+    fn non_flag_pattern_skips_maybe_value() {
+        let rule = DenyRule::Arg("s3".into());
+        let normalized = normalize_args(&args(&["iam", "create-access-key", "--output", "s3"]));
+        assert!(rule.matches(&normalized).is_none());
+    }
+
+    #[test]
+    fn non_flag_pattern_matches_positional() {
+        let rule = DenyRule::Arg("s3".into());
+        let normalized = normalize_args(&args(&["s3", "ls", "--recursive"]));
+        assert!(rule.matches(&normalized).is_some());
+    }
+
+    #[test]
+    fn non_flag_pattern_matches_after_double_dash() {
+        let rule = DenyRule::Arg("destroy".into());
+        let normalized = normalize_args(&args(&["--", "destroy"]));
+        assert!(rule.matches(&normalized).is_some());
+    }
+
+    #[test]
+    fn sequence_positional_element_skips_maybe_value() {
+        let rule = parse_deny_entry("destroy & --force").unwrap();
+        let normalized = normalize_args(&args(&["plan", "--label", "destroy", "--force"]));
+        assert!(rule.matches(&normalized).is_none());
+    }
+
+    // --- Built-in module integration tests ---
+
+    #[test]
+    fn builtin_git_deny_credential_still_works() {
+        let module =
+            crate::commands::CommandModule::parse(include_str!("builtins/git/module.toml"))
+                .unwrap();
+        assert!(module.check_deny(&args(&["credential", "fill"])).is_some());
+        assert!(module.check_deny(&args(&["-cevil"])).is_some());
+        assert!(module.check_deny(&args(&["--config=x"])).is_some());
+        assert!(module.check_deny(&args(&["push"])).is_none());
+    }
+
+    #[test]
+    fn builtin_terraform_deny_destroy_still_works() {
+        let module =
+            crate::commands::CommandModule::parse(include_str!("builtins/terraform/module.toml"))
+                .unwrap();
+        assert!(module.check_deny(&args(&["destroy"])).is_some());
+        assert!(module
+            .check_deny(&args(&["apply", "-auto-approve"]))
+            .is_some());
+        assert!(module.check_deny(&args(&["plan"])).is_none());
+    }
+
+    #[test]
+    fn builtin_aws_deny_still_works() {
+        let module =
+            crate::commands::CommandModule::parse(include_str!("builtins/aws/module.toml"))
+                .unwrap();
+        assert!(module
+            .check_deny(&args(&["ec2", "terminate-instances"]))
+            .is_some());
+        assert!(module.check_deny(&args(&["s3", "ls"])).is_none());
+    }
+
+    #[test]
+    fn builtin_aws_false_positive_fixed() {
+        let module =
+            crate::commands::CommandModule::parse(include_str!("builtins/aws/module.toml"))
+                .unwrap();
+        assert!(module
+            .check_deny(&args(&["s3", "ls", "--prefix", "delete-bucket"]))
+            .is_none());
+    }
+
+    #[test]
+    fn builtin_docker_deny_still_works() {
+        let module =
+            crate::commands::CommandModule::parse(include_str!("builtins/docker/module.toml"))
+                .unwrap();
+        assert!(module
+            .check_deny(&args(&["run", "--privileged"]))
+            .is_some());
+        assert!(module
+            .check_deny(&args(&["run", "-v", "/:/host"]))
+            .is_some());
+        assert!(module.check_deny(&args(&["ps"])).is_none());
+    }
+
+    #[test]
+    fn builtin_ssh_deny_still_works() {
+        let module =
+            crate::commands::CommandModule::parse(include_str!("builtins/ssh/module.toml"))
+                .unwrap();
+        assert!(module.check_deny(&args(&["-A", "host"])).is_some());
+        assert!(module.check_deny(&args(&["host"])).is_none());
     }
 
     // --- Full module parse tests ---

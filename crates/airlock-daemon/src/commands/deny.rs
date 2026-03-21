@@ -16,9 +16,9 @@ pub struct NormalizedArg {
 }
 
 #[derive(Debug, Clone)]
-pub enum DenyRule {
+pub enum Rule {
     Arg(String),
-    Sequence(Vec<DenyRule>),
+    Sequence(Vec<Rule>),
     FlagValue {
         flag: String,
         pattern: String,
@@ -30,36 +30,36 @@ fn is_glob_pattern(s: &str) -> bool {
     s.contains('*') || s.contains('?') || s.contains('[')
 }
 
-pub fn parse_deny_entry(entry: &str) -> Result<DenyRule, String> {
-    parse_deny_entry_inner(entry, 0)
+pub fn parse_rule_entry(entry: &str) -> Result<Rule, String> {
+    parse_rule_entry_inner(entry, 0)
 }
 
-fn parse_deny_entry_inner(entry: &str, depth: u8) -> Result<DenyRule, String> {
+fn parse_rule_entry_inner(entry: &str, depth: u8) -> Result<Rule, String> {
     if depth == 0 && entry.contains(" & ") {
-        let rules: Result<Vec<DenyRule>, String> = entry
+        let rules: Result<Vec<Rule>, String> = entry
             .split(" & ")
-            .map(|e| parse_deny_entry_inner(e, depth + 1))
+            .map(|e| parse_rule_entry_inner(e, depth + 1))
             .collect();
-        Ok(DenyRule::Sequence(rules?))
+        Ok(Rule::Sequence(rules?))
     } else if entry.starts_with('-') && entry.contains('=') {
         let (flag, pattern) = entry.split_once('=').unwrap();
         let matcher = Glob::new(pattern)
-            .map_err(|e| format!("invalid glob in deny entry '{}': {}", entry, e))?
+            .map_err(|e| format!("invalid glob in rule entry '{}': {}", entry, e))?
             .compile_matcher();
-        Ok(DenyRule::FlagValue {
+        Ok(Rule::FlagValue {
             flag: flag.into(),
             pattern: pattern.into(),
             matcher,
         })
     } else {
-        Ok(DenyRule::Arg(entry.into()))
+        Ok(Rule::Arg(entry.into()))
     }
 }
 
-impl DenyRule {
+impl Rule {
     pub fn matches(&self, normalized: &[NormalizedArg]) -> Option<String> {
         match self {
-            DenyRule::Arg(pattern) => {
+            Rule::Arg(pattern) => {
                 let pattern_is_flag = pattern.starts_with('-');
                 for n in normalized {
                     if pattern_is_flag {
@@ -77,7 +77,7 @@ impl DenyRule {
                 }
                 None
             }
-            DenyRule::Sequence(rules) => {
+            Rule::Sequence(rules) => {
                 let all_match = rules.iter().all(|r| r.matches(normalized).is_some());
                 if all_match {
                     let descriptions: Vec<String> = rules.iter().map(|r| r.entry_text()).collect();
@@ -86,7 +86,7 @@ impl DenyRule {
                     None
                 }
             }
-            DenyRule::FlagValue {
+            Rule::FlagValue {
                 flag,
                 pattern,
                 matcher,
@@ -125,9 +125,9 @@ impl DenyRule {
 
     fn entry_text(&self) -> String {
         match self {
-            DenyRule::Arg(s) => s.clone(),
-            DenyRule::FlagValue { flag, pattern, .. } => format!("{flag}={pattern}"),
-            DenyRule::Sequence(rules) => rules
+            Rule::Arg(s) => s.clone(),
+            Rule::FlagValue { flag, pattern, .. } => format!("{flag}={pattern}"),
+            Rule::Sequence(rules) => rules
                 .iter()
                 .map(|r| r.entry_text())
                 .collect::<Vec<_>>()
@@ -395,8 +395,8 @@ mod tests {
         assert_eq!(n.role, ArgRole::Flag);
     }
 
-    fn flag_value(flag: &str, pattern: &str) -> DenyRule {
-        parse_deny_entry(&format!("{flag}={pattern}")).unwrap()
+    fn flag_value(flag: &str, pattern: &str) -> Rule {
+        parse_rule_entry(&format!("{flag}={pattern}")).unwrap()
     }
 
     // --- End-of-options (--) tests ---
@@ -409,20 +409,20 @@ mod tests {
         assert_eq!(normalized[2].raw, "--config=evil");
     }
 
-    // --- parse_deny_entry tests ---
+    // --- parse_rule_entry tests ---
 
     #[test]
     fn parse_entry_plain_arg() {
-        match parse_deny_entry("destroy").unwrap() {
-            DenyRule::Arg(s) => assert_eq!(s, "destroy"),
+        match parse_rule_entry("destroy").unwrap() {
+            Rule::Arg(s) => assert_eq!(s, "destroy"),
             other => panic!("expected Arg, got {:?}", other),
         }
     }
 
     #[test]
     fn parse_entry_flag_value_long() {
-        match parse_deny_entry("--pid=host").unwrap() {
-            DenyRule::FlagValue { flag, pattern, .. } => {
+        match parse_rule_entry("--pid=host").unwrap() {
+            Rule::FlagValue { flag, pattern, .. } => {
                 assert_eq!(flag, "--pid");
                 assert_eq!(pattern, "host");
             }
@@ -432,8 +432,8 @@ mod tests {
 
     #[test]
     fn parse_entry_flag_value_short() {
-        match parse_deny_entry("-v=/*:*").unwrap() {
-            DenyRule::FlagValue { flag, pattern, .. } => {
+        match parse_rule_entry("-v=/*:*").unwrap() {
+            Rule::FlagValue { flag, pattern, .. } => {
                 assert_eq!(flag, "-v");
                 assert_eq!(pattern, "/*:*");
             }
@@ -443,11 +443,11 @@ mod tests {
 
     #[test]
     fn parse_entry_sequence() {
-        match parse_deny_entry("apply & -auto-approve").unwrap() {
-            DenyRule::Sequence(rules) => {
+        match parse_rule_entry("apply & -auto-approve").unwrap() {
+            Rule::Sequence(rules) => {
                 assert_eq!(rules.len(), 2);
-                assert!(matches!(&rules[0], DenyRule::Arg(s) if s == "apply"));
-                assert!(matches!(&rules[1], DenyRule::Arg(s) if s == "-auto-approve"));
+                assert!(matches!(&rules[0], Rule::Arg(s) if s == "apply"));
+                assert!(matches!(&rules[1], Rule::Arg(s) if s == "-auto-approve"));
             }
             other => panic!("expected Sequence, got {:?}", other),
         }
@@ -455,22 +455,20 @@ mod tests {
 
     #[test]
     fn parse_entry_positional_with_equals() {
-        match parse_deny_entry("not-a-flag=value").unwrap() {
-            DenyRule::Arg(s) => assert_eq!(s, "not-a-flag=value"),
+        match parse_rule_entry("not-a-flag=value").unwrap() {
+            Rule::Arg(s) => assert_eq!(s, "not-a-flag=value"),
             other => panic!("expected Arg, got {:?}", other),
         }
     }
 
     #[test]
     fn parse_entry_sequence_with_flag_value() {
-        match parse_deny_entry("run & -v=/*:*").unwrap() {
-            DenyRule::Sequence(rules) => {
+        match parse_rule_entry("run & -v=/*:*").unwrap() {
+            Rule::Sequence(rules) => {
                 assert_eq!(rules.len(), 2);
-                assert!(matches!(&rules[0], DenyRule::Arg(s) if s == "run"));
-                assert!(
-                    matches!(&rules[1], DenyRule::FlagValue { flag, pattern, .. }
-                    if flag == "-v" && pattern == "/*:*")
-                );
+                assert!(matches!(&rules[0], Rule::Arg(s) if s == "run"));
+                assert!(matches!(&rules[1], Rule::FlagValue { flag, pattern, .. }
+                    if flag == "-v" && pattern == "/*:*"));
             }
             other => panic!("expected Sequence, got {:?}", other),
         }
@@ -479,12 +477,12 @@ mod tests {
     #[test]
     fn parse_entry_sequence_depth_capped() {
         // Nested " & " inside a sequence element is treated as literal
-        match parse_deny_entry("a & b & c").unwrap() {
-            DenyRule::Sequence(rules) => {
+        match parse_rule_entry("a & b & c").unwrap() {
+            Rule::Sequence(rules) => {
                 assert_eq!(rules.len(), 3);
-                assert!(matches!(&rules[0], DenyRule::Arg(s) if s == "a"));
-                assert!(matches!(&rules[1], DenyRule::Arg(s) if s == "b"));
-                assert!(matches!(&rules[2], DenyRule::Arg(s) if s == "c"));
+                assert!(matches!(&rules[0], Rule::Arg(s) if s == "a"));
+                assert!(matches!(&rules[1], Rule::Arg(s) if s == "b"));
+                assert!(matches!(&rules[2], Rule::Arg(s) if s == "c"));
             }
             other => panic!("expected Sequence, got {:?}", other),
         }
@@ -492,7 +490,7 @@ mod tests {
 
     #[test]
     fn parse_entry_invalid_glob() {
-        assert!(parse_deny_entry("-v=/*[:*").is_err());
+        assert!(parse_rule_entry("-v=/*[:*").is_err());
     }
 
     #[test]
@@ -511,53 +509,53 @@ args = ["-v=/*[:*"]
 
     #[test]
     fn arg_rule_exact_raw_match() {
-        let rule = DenyRule::Arg("destroy".into());
+        let rule = Rule::Arg("destroy".into());
         let normalized = normalize_args(&args(&["apply", "destroy"]));
         assert!(rule.matches(&normalized).is_some());
     }
 
     #[test]
     fn arg_rule_no_match() {
-        let rule = DenyRule::Arg("destroy".into());
+        let rule = Rule::Arg("destroy".into());
         let normalized = normalize_args(&args(&["apply", "plan"]));
         assert!(rule.matches(&normalized).is_none());
     }
 
     #[test]
     fn arg_rule_matches_normalized_long_flag() {
-        let rule = DenyRule::Arg("--config".into());
+        let rule = Rule::Arg("--config".into());
         let normalized = normalize_args(&args(&["--config=evil", "status"]));
         assert!(rule.matches(&normalized).is_some());
     }
 
     #[test]
     fn arg_rule_matches_normalized_short_flag() {
-        let rule = DenyRule::Arg("-c".into());
+        let rule = Rule::Arg("-c".into());
         let normalized = normalize_args(&args(&["-cevil", "status"]));
         assert!(rule.matches(&normalized).is_some());
     }
 
     #[test]
     fn arg_rule_does_not_match_unrelated_flag() {
-        let rule = DenyRule::Arg("--config".into());
+        let rule = Rule::Arg("--config".into());
         let normalized = normalize_args(&args(&["--other=val"]));
         assert!(rule.matches(&normalized).is_none());
     }
 
     #[test]
     fn raw_deny_still_applies_after_double_dash() {
-        let rule = DenyRule::Arg("--privileged".into());
+        let rule = Rule::Arg("--privileged".into());
         let normalized = normalize_args(&args(&["--", "run", "--privileged", "alpine"]));
         assert!(rule.matches(&normalized).is_some());
     }
 
     #[test]
     fn raw_deny_after_double_dash_no_false_positive() {
-        let rule = DenyRule::Arg("--pid=host".into());
+        let rule = Rule::Arg("--pid=host".into());
         let normalized = normalize_args(&args(&["--", "--pid=host"]));
         assert!(rule.matches(&normalized).is_some());
 
-        let rule2 = DenyRule::Arg("--pid=evil".into());
+        let rule2 = Rule::Arg("--pid=evil".into());
         assert!(rule2.matches(&normalized).is_none());
     }
 
@@ -565,49 +563,49 @@ args = ["-v=/*[:*"]
 
     #[test]
     fn sequence_all_present() {
-        let rule = parse_deny_entry("apply & -auto-approve").unwrap();
+        let rule = parse_rule_entry("apply & -auto-approve").unwrap();
         let normalized = normalize_args(&args(&["apply", "-auto-approve"]));
         assert!(rule.matches(&normalized).is_some());
     }
 
     #[test]
     fn sequence_one_missing() {
-        let rule = parse_deny_entry("apply & -auto-approve").unwrap();
+        let rule = parse_rule_entry("apply & -auto-approve").unwrap();
         let normalized = normalize_args(&args(&["apply"]));
         assert!(rule.matches(&normalized).is_none());
     }
 
     #[test]
     fn sequence_order_independent() {
-        let rule = parse_deny_entry("apply & -auto-approve").unwrap();
+        let rule = parse_rule_entry("apply & -auto-approve").unwrap();
         let normalized = normalize_args(&args(&["-auto-approve", "apply"]));
         assert!(rule.matches(&normalized).is_some());
     }
 
     #[test]
     fn sequence_with_extra_args() {
-        let rule = parse_deny_entry("apply & -auto-approve").unwrap();
+        let rule = parse_rule_entry("apply & -auto-approve").unwrap();
         let normalized = normalize_args(&args(&["plan", "apply", "-auto-approve", "-input=false"]));
         assert!(rule.matches(&normalized).is_some());
     }
 
     #[test]
     fn sequence_with_flag_value_element() {
-        let rule = parse_deny_entry("run & -v=/*:*").unwrap();
+        let rule = parse_rule_entry("run & -v=/*:*").unwrap();
         let normalized = normalize_args(&args(&["run", "-v", "/:/host"]));
         assert!(rule.matches(&normalized).is_some());
     }
 
     #[test]
     fn sequence_with_flag_value_no_match() {
-        let rule = parse_deny_entry("run & -v=/*:*").unwrap();
+        let rule = parse_rule_entry("run & -v=/*:*").unwrap();
         let normalized = normalize_args(&args(&["run", "-v", "mydata:/data"]));
         assert!(rule.matches(&normalized).is_none());
     }
 
     #[test]
     fn sequence_with_flag_value_missing_positional() {
-        let rule = parse_deny_entry("run & -v=/*:*").unwrap();
+        let rule = parse_rule_entry("run & -v=/*:*").unwrap();
         let normalized = normalize_args(&args(&["-v", "/:/host"]));
         assert!(rule.matches(&normalized).is_none());
     }
@@ -696,7 +694,7 @@ args = ["-v=/*[:*"]
 
     #[test]
     fn arg_match_returns_entry_text() {
-        let rule = DenyRule::Arg("--privileged".into());
+        let rule = Rule::Arg("--privileged".into());
         let normalized = normalize_args(&args(&["--privileged"]));
         assert_eq!(rule.matches(&normalized).unwrap(), "--privileged");
     }
@@ -710,7 +708,7 @@ args = ["-v=/*[:*"]
 
     #[test]
     fn sequence_match_returns_entry_text() {
-        let rule = parse_deny_entry("apply & -auto-approve").unwrap();
+        let rule = parse_rule_entry("apply & -auto-approve").unwrap();
         let normalized = normalize_args(&args(&["apply", "-auto-approve"]));
         assert_eq!(rule.matches(&normalized).unwrap(), "apply & -auto-approve");
     }
@@ -751,7 +749,7 @@ args = ["-v=/*[:*"]
 
         #[test]
         fn arg_rule_split_joined_equivalence(flag in "--[a-z]{1,8}", value in "[a-z0-9]{1,8}") {
-            let rule = DenyRule::Arg(flag.clone());
+            let rule = Rule::Arg(flag.clone());
             let joined = vec![format!("{flag}={value}")];
             let split = vec![flag.clone(), value];
             let norm_joined = normalize_args(&joined);
@@ -794,21 +792,21 @@ args = ["-v=/*[:*"]
 
         #[test]
         fn parse_entry_classification(entry in "[a-z\\-=&/ ]{1,20}") {
-            let rule = parse_deny_entry(&entry);
+            let rule = parse_rule_entry(&entry);
             if entry.contains(" & ") {
                 // Sequence elements with invalid globs produce Err
                 if let Ok(r) = &rule {
-                    prop_assert!(matches!(r, DenyRule::Sequence(_)),
+                    prop_assert!(matches!(r, Rule::Sequence(_)),
                         "entry with ' & ' should be Sequence");
                 }
             } else if entry.starts_with('-') && entry.contains('=') {
                 // All patterns without glob chars are valid
                 let r = rule.unwrap();
-                let is_fv = matches!(r, DenyRule::FlagValue { .. });
+                let is_fv = matches!(r, Rule::FlagValue { .. });
                 prop_assert!(is_fv, "entry starting with - containing = should be FlagValue");
             } else {
                 let r = rule.unwrap();
-                prop_assert!(matches!(r, DenyRule::Arg(_)),
+                prop_assert!(matches!(r, Rule::Arg(_)),
                     "other entries should be Arg");
             }
         }
@@ -892,28 +890,28 @@ args = ["-v=/*[:*"]
 
     #[test]
     fn non_flag_pattern_skips_maybe_value() {
-        let rule = DenyRule::Arg("s3".into());
+        let rule = Rule::Arg("s3".into());
         let normalized = normalize_args(&args(&["iam", "create-access-key", "--output", "s3"]));
         assert!(rule.matches(&normalized).is_none());
     }
 
     #[test]
     fn non_flag_pattern_matches_positional() {
-        let rule = DenyRule::Arg("s3".into());
+        let rule = Rule::Arg("s3".into());
         let normalized = normalize_args(&args(&["s3", "ls", "--recursive"]));
         assert!(rule.matches(&normalized).is_some());
     }
 
     #[test]
     fn non_flag_pattern_matches_after_double_dash() {
-        let rule = DenyRule::Arg("destroy".into());
+        let rule = Rule::Arg("destroy".into());
         let normalized = normalize_args(&args(&["--", "destroy"]));
         assert!(rule.matches(&normalized).is_some());
     }
 
     #[test]
     fn sequence_positional_element_skips_maybe_value() {
-        let rule = parse_deny_entry("destroy & --force").unwrap();
+        let rule = parse_rule_entry("destroy & --force").unwrap();
         let normalized = normalize_args(&args(&["plan", "--label", "destroy", "--force"]));
         assert!(rule.matches(&normalized).is_none());
     }
@@ -925,10 +923,12 @@ args = ["-v=/*[:*"]
         let module =
             crate::commands::CommandModule::parse(include_str!("builtins/git/module.toml"))
                 .unwrap();
-        assert!(module.check_deny(&args(&["credential", "fill"])).is_some());
-        assert!(module.check_deny(&args(&["-cevil"])).is_some());
-        assert!(module.check_deny(&args(&["--config=x"])).is_some());
-        assert!(module.check_deny(&args(&["push"])).is_none());
+        assert!(module
+            .check_policy(&args(&["credential", "fill"]))
+            .is_some());
+        assert!(module.check_policy(&args(&["-cevil"])).is_some());
+        assert!(module.check_policy(&args(&["--config=x"])).is_some());
+        assert!(module.check_policy(&args(&["push"])).is_none());
     }
 
     #[test]
@@ -936,11 +936,11 @@ args = ["-v=/*[:*"]
         let module =
             crate::commands::CommandModule::parse(include_str!("builtins/terraform/module.toml"))
                 .unwrap();
-        assert!(module.check_deny(&args(&["destroy"])).is_some());
+        assert!(module.check_policy(&args(&["destroy"])).is_some());
         assert!(module
-            .check_deny(&args(&["apply", "-auto-approve"]))
+            .check_policy(&args(&["apply", "-auto-approve"]))
             .is_some());
-        assert!(module.check_deny(&args(&["plan"])).is_none());
+        assert!(module.check_policy(&args(&["plan"])).is_none());
     }
 
     #[test]
@@ -949,9 +949,9 @@ args = ["-v=/*[:*"]
             crate::commands::CommandModule::parse(include_str!("builtins/aws/module.toml"))
                 .unwrap();
         assert!(module
-            .check_deny(&args(&["ec2", "terminate-instances"]))
+            .check_policy(&args(&["ec2", "terminate-instances"]))
             .is_some());
-        assert!(module.check_deny(&args(&["s3", "ls"])).is_none());
+        assert!(module.check_policy(&args(&["s3", "ls"])).is_none());
     }
 
     #[test]
@@ -960,7 +960,7 @@ args = ["-v=/*[:*"]
             crate::commands::CommandModule::parse(include_str!("builtins/aws/module.toml"))
                 .unwrap();
         assert!(module
-            .check_deny(&args(&["s3", "ls", "--prefix", "delete-bucket"]))
+            .check_policy(&args(&["s3", "ls", "--prefix", "delete-bucket"]))
             .is_none());
     }
 
@@ -969,11 +969,13 @@ args = ["-v=/*[:*"]
         let module =
             crate::commands::CommandModule::parse(include_str!("builtins/docker/module.toml"))
                 .unwrap();
-        assert!(module.check_deny(&args(&["run", "--privileged"])).is_some());
         assert!(module
-            .check_deny(&args(&["run", "-v", "/:/host"]))
+            .check_policy(&args(&["run", "--privileged"]))
             .is_some());
-        assert!(module.check_deny(&args(&["ps"])).is_none());
+        assert!(module
+            .check_policy(&args(&["run", "-v", "/:/host"]))
+            .is_some());
+        assert!(module.check_policy(&args(&["ps"])).is_none());
     }
 
     #[test]
@@ -981,8 +983,8 @@ args = ["-v=/*[:*"]
         let module =
             crate::commands::CommandModule::parse(include_str!("builtins/ssh/module.toml"))
                 .unwrap();
-        assert!(module.check_deny(&args(&["-A", "host"])).is_some());
-        assert!(module.check_deny(&args(&["host"])).is_none());
+        assert!(module.check_policy(&args(&["-A", "host"])).is_some());
+        assert!(module.check_policy(&args(&["host"])).is_none());
     }
 
     // --- Full module parse tests ---
@@ -1003,5 +1005,240 @@ concurrent = true
             crate::commands::CommandModule::parse(toml_str).expect("should parse full module");
         let deny = module.deny.as_ref().unwrap();
         assert_eq!(deny.args.len(), 3);
+    }
+
+    // --- Policy mode parse validation tests ---
+
+    #[test]
+    fn parse_allow_section() {
+        use crate::commands::module::PolicyMode;
+        let toml_str = r#"
+[command]
+bin = "aws"
+
+[allow]
+args = ["s3", "sts", "ecr"]
+"#;
+        let module = crate::commands::CommandModule::parse(toml_str).unwrap();
+        assert_eq!(module.policy_mode(), PolicyMode::Allow);
+    }
+
+    #[test]
+    fn parse_both_sections_is_error() {
+        let toml_str = r#"
+[command]
+bin = "aws"
+
+[allow]
+args = ["s3"]
+
+[deny]
+args = ["destroy"]
+"#;
+        match crate::commands::CommandModule::parse(toml_str) {
+            Err(e) => assert!(
+                e.contains("both [allow] and [deny]"),
+                "unexpected error: {e}"
+            ),
+            Ok(_) => panic!("expected error for module with both [allow] and [deny]"),
+        }
+    }
+
+    #[test]
+    fn parse_neither_section_is_error() {
+        let toml_str = r#"
+[command]
+bin = "deploy-cli"
+"#;
+        match crate::commands::CommandModule::parse(toml_str) {
+            Err(e) => assert!(
+                e.contains("must have an [allow] or [deny]"),
+                "unexpected error: {e}"
+            ),
+            Ok(_) => panic!("expected error for module with neither [allow] nor [deny]"),
+        }
+    }
+
+    // --- Allow mode matching tests ---
+
+    #[test]
+    fn allow_mode_permits_matching_operation() {
+        let toml_str = r#"
+[command]
+bin = "aws"
+
+[allow]
+args = ["s3", "sts"]
+"#;
+        let module = crate::commands::CommandModule::parse(toml_str).unwrap();
+        assert!(module.check_policy(&args(&["s3", "ls"])).is_none());
+        assert!(module
+            .check_policy(&args(&["sts", "get-caller-identity"]))
+            .is_none());
+    }
+
+    #[test]
+    fn allow_mode_blocks_non_matching_operation() {
+        let toml_str = r#"
+[command]
+bin = "aws"
+
+[allow]
+args = ["s3", "sts"]
+"#;
+        let module = crate::commands::CommandModule::parse(toml_str).unwrap();
+        assert!(module
+            .check_policy(&args(&["iam", "create-access-key"]))
+            .is_some());
+        assert!(module
+            .check_policy(&args(&["ec2", "terminate-instances"]))
+            .is_some());
+    }
+
+    #[test]
+    fn allow_mode_sequence_rule() {
+        let toml_str = r#"
+[command]
+bin = "aws"
+
+[allow]
+args = ["s3 & ls", "s3 & cp", "sts & get-caller-identity"]
+"#;
+        let module = crate::commands::CommandModule::parse(toml_str).unwrap();
+        assert!(module.check_policy(&args(&["s3", "ls"])).is_none());
+        assert!(module
+            .check_policy(&args(&["s3", "cp", "file.txt", "s3://bucket/"]))
+            .is_none());
+        assert!(module.check_policy(&args(&["s3", "sync"])).is_some());
+    }
+
+    #[test]
+    fn allow_mode_with_flags_pass_through() {
+        let toml_str = r#"
+[command]
+bin = "aws"
+
+[allow]
+args = ["s3"]
+"#;
+        let module = crate::commands::CommandModule::parse(toml_str).unwrap();
+        assert!(module
+            .check_policy(&args(&["s3", "ls", "--recursive"]))
+            .is_none());
+        assert!(module
+            .check_policy(&args(&["s3", "cp", "--acl", "public-read"]))
+            .is_none());
+    }
+
+    #[test]
+    fn allow_mode_flag_value_does_not_false_match() {
+        let toml_str = r#"
+[command]
+bin = "aws"
+
+[allow]
+args = ["s3"]
+"#;
+        let module = crate::commands::CommandModule::parse(toml_str).unwrap();
+        // "s3" appears as a flag value, not a subcommand -- should be denied
+        assert!(module
+            .check_policy(&args(&["iam", "create-access-key", "--output", "s3"]))
+            .is_some());
+    }
+
+    #[test]
+    fn allow_mode_no_args_denied() {
+        let toml_str = r#"
+[command]
+bin = "aws"
+
+[allow]
+args = ["s3"]
+"#;
+        let module = crate::commands::CommandModule::parse(toml_str).unwrap();
+        assert!(module.check_policy(&[]).is_some());
+    }
+
+    #[test]
+    fn allow_empty_args_denies_everything() {
+        let toml_str = r#"
+[command]
+bin = "aws"
+
+[allow]
+args = []
+"#;
+        let module = crate::commands::CommandModule::parse(toml_str).unwrap();
+        assert!(module.check_policy(&args(&["s3", "ls"])).is_some());
+        assert!(module.check_policy(&args(&["iam"])).is_some());
+    }
+
+    #[test]
+    fn deny_empty_args_allows_everything() {
+        let toml_str = r#"
+[command]
+bin = "custom"
+
+[deny]
+args = []
+"#;
+        let module = crate::commands::CommandModule::parse(toml_str).unwrap();
+        assert!(module.check_policy(&args(&["anything"])).is_none());
+        assert!(module.check_policy(&[]).is_none());
+    }
+
+    // --- check_policy return value tests ---
+
+    #[test]
+    fn check_policy_deny_reason_format() {
+        let toml_str = r#"
+[command]
+bin = "terraform"
+
+[deny]
+args = ["destroy"]
+"#;
+        let module = crate::commands::CommandModule::parse(toml_str).unwrap();
+        let reason = module.check_policy(&args(&["destroy"])).unwrap();
+        assert!(reason.starts_with("denied by deny rule:"));
+        assert!(reason.contains("destroy"));
+    }
+
+    #[test]
+    fn check_policy_allow_reason_format() {
+        let toml_str = r#"
+[command]
+bin = "aws"
+
+[allow]
+args = ["s3"]
+"#;
+        let module = crate::commands::CommandModule::parse(toml_str).unwrap();
+        let reason = module.check_policy(&args(&["iam"])).unwrap();
+        assert_eq!(reason, "not in allow list");
+    }
+
+    // --- Built-in module policy mode tests ---
+
+    #[test]
+    fn all_builtins_parse_with_deny_mode() {
+        use crate::commands::module::PolicyMode;
+        let builtins = [
+            ("git", include_str!("builtins/git/module.toml")),
+            ("terraform", include_str!("builtins/terraform/module.toml")),
+            ("aws", include_str!("builtins/aws/module.toml")),
+            ("docker", include_str!("builtins/docker/module.toml")),
+            ("ssh", include_str!("builtins/ssh/module.toml")),
+        ];
+        for (name, toml_str) in builtins {
+            let module = crate::commands::CommandModule::parse(toml_str)
+                .unwrap_or_else(|e| panic!("built-in '{}' failed to parse: {}", name, e));
+            assert_eq!(
+                module.policy_mode(),
+                PolicyMode::Deny,
+                "built-in '{}' should be deny mode",
+                name
+            );
+        }
     }
 }

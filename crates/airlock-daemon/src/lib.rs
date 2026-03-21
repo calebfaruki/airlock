@@ -322,13 +322,10 @@ pub fn evaluate_request<'a>(
         }
     };
 
-    if let Some(denied) = module.check_deny(&params.args) {
+    if let Some(reason) = module.check_policy(&params.args) {
         return EvalDecision::Denied {
             code: -32600,
-            reason: format!(
-                "denied: '{}' not permitted for '{}'",
-                denied, params.command
-            ),
+            reason: format!("{} for '{}'", reason, params.command),
         };
     }
 

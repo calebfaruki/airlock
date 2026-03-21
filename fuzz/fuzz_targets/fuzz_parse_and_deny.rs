@@ -20,6 +20,6 @@ fuzz_target!(|data: &[u8]| {
             .map(|a| a.to_string())
             .collect();
 
-        let _ = module.check_deny(&args);
+        let _ = module.check_policy(&args);
     }
 });

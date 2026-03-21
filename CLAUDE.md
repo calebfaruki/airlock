@@ -166,13 +166,7 @@ TOML file per command. Built-in modules are compiled into the binary and version
 
 ### TOML Schema
 
-Minimal module (user-authored, just registers a command):
-```toml
-[command]
-bin = "deploy-cli"
-```
-
-Full module (built-in, with security hardening):
+Deny mode — block these, allow everything else:
 ```toml
 [command]
 bin = "git"
@@ -191,12 +185,24 @@ append = ["--config", "core.hooksPath=/dev/null"]
 concurrent = true
 ```
 
+Allow mode — permit these, block everything else:
+```toml
+[command]
+bin = "aws"
+
+[allow]
+args = ["s3", "sts", "ecr", "ecs", "ssm", "logs"]
+```
+
+A module must have exactly one of `[allow]` or `[deny]`. Both present is an error. Neither present is an error. Both sections use the same `args` format — same parsing, same rule types (plain args, sequences with `&`, flag-value patterns with `=`).
+
 ### Schema reference
 
 | Section | Field | Type | Description |
 |---------|-------|------|-------------|
 | `[command]` | `bin` | string | The executable name on the host |
-| `[deny]` | `args` | string array | Patterns matched against the args array. If any arg matches, the request is denied. Covers subcommands, flags, anything — args are just strings in one flat array. |
+| `[deny]` | `args` | string array | Patterns matched against the args array. If any arg matches, the request is denied. Mutually exclusive with `[allow]`. |
+| `[allow]` | `args` | string array | Patterns matched against the args array. If any arg matches, the request is allowed. No match means denied. Mutually exclusive with `[deny]`. |
 | `[env]` | `strip` | string array | Environment variable names to remove before execution |
 | `[env]` | `set` | key-value map | Environment variables to inject before execution |
 | `[args]` | `append` | string array | Args appended to every invocation of this command |
@@ -306,7 +312,7 @@ Dry-runs a command through the evaluation pipeline without executing it. Two pha
 **Phase 1 (static):** Walks the four decision steps using config and profile files on disk:
 1. **Command enabled?** — is the command in `commands.enable`?
 2. **Module found?** — built-in or user override? (informational, never denies independently)
-3. **Deny rules?** — normalized args evaluated against all deny rules
+3. **Policy rules?** — normalized args evaluated against deny or allow rules
 4. **Profile allows?** — is the command in the profile's `commands` list?
 
 **Phase 2 (live):** Connects to the daemon's socket and sends a `check` request. Confirms the daemon's decision matches the static analysis.

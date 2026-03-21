@@ -196,6 +196,12 @@ impl CommandRegistry {
         names.sort();
         names
     }
+
+    pub fn load_from_str(&mut self, name: &str, toml_str: &str) -> Result<(), String> {
+        let module = CommandModule::parse(toml_str)?;
+        self.modules.insert(name.to_string(), module);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -240,10 +246,14 @@ mod tests {
             std::env::temp_dir().join(format!("airlock-test-overrides-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
 
-        std::fs::write(dir.join("git.toml"), "[command]\nbin = \"git-custom\"\n").unwrap();
+        std::fs::write(
+            dir.join("git.toml"),
+            "[command]\nbin = \"git-custom\"\n\n[deny]\nargs = []\n",
+        )
+        .unwrap();
         std::fs::write(
             dir.join("terraform.toml"),
-            "[command]\nbin = \"terraform\"\n",
+            "[command]\nbin = \"terraform\"\n\n[deny]\nargs = []\n",
         )
         .unwrap();
 

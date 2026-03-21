@@ -1,4 +1,5 @@
 use crate::commands::deny::NormalizedArg;
+use crate::commands::module::PolicyMode;
 use crate::commands::CommandRegistry;
 use crate::profile::Profile;
 use std::collections::HashSet;
@@ -18,7 +19,7 @@ pub struct WhyResult {
     pub args: Vec<String>,
     pub normalized: Option<Vec<NormalizedArg>>,
     pub steps: Vec<(&'static str, StepResult)>,
-    pub deny_detail: Option<String>,
+    pub policy_detail: Option<String>,
     pub hook_notice: bool,
 }
 
@@ -33,12 +34,12 @@ pub fn evaluate(
 ) -> WhyResult {
     let mut steps: Vec<(&str, StepResult)> = Vec::with_capacity(4);
     let mut normalized = None;
-    let mut deny_detail = None;
+    let mut policy_detail = None;
 
     let build_result = |outcome: &str,
                         steps: Vec<(&'static str, StepResult)>,
                         normalized: Option<Vec<NormalizedArg>>,
-                        deny_detail: Option<String>,
+                        policy_detail: Option<String>,
                         hook_notice: bool| WhyResult {
         outcome: outcome.to_string(),
         profile: profile_name.to_string(),
@@ -46,7 +47,7 @@ pub fn evaluate(
         args: args.to_vec(),
         normalized,
         steps,
-        deny_detail,
+        policy_detail,
         hook_notice,
     };
 
@@ -57,13 +58,13 @@ pub fn evaluate(
             StepResult::Denied(format!("{command} is not in commands.enable")),
         ));
         steps.push(("module found", StepResult::NotReached));
-        steps.push(("deny rules", StepResult::NotReached));
+        steps.push(("policy rules", StepResult::NotReached));
         steps.push(("profile check", StepResult::NotReached));
         return build_result(
             "DENIED -- command not enabled",
             steps,
             normalized,
-            deny_detail,
+            policy_detail,
             false,
         );
     }
@@ -84,22 +85,42 @@ pub fn evaluate(
         StepResult::Ok(format!("{command} ({source})")),
     ));
 
-    // Step 3: deny rules
-    let eval = module.check_deny_verbose(args);
+    // Step 3: policy rules
+    let eval = module.check_policy_verbose(args);
     normalized = Some(eval.normalized);
-    if let Some(ref rule) = eval.matched_rule {
-        steps.push((
-            "deny rules",
-            StepResult::Denied(format!("matched '{rule}'")),
-        ));
-        deny_detail = eval.matched_detail;
+    let step_label: &'static str = match eval.mode {
+        PolicyMode::Allow => "allow rules",
+        PolicyMode::Deny => "deny rules",
+    };
+
+    if eval.denied {
+        let detail = match eval.mode {
+            PolicyMode::Deny => format!("matched '{}'", eval.matched_rule.as_ref().unwrap()),
+            PolicyMode::Allow => {
+                format!("{} rules checked, none matched", eval.rules_checked)
+            }
+        };
+        steps.push((step_label, StepResult::Denied(detail)));
+        policy_detail = eval.matched_detail;
         steps.push(("profile check", StepResult::NotReached));
-        return build_result("DENIED by deny rule", steps, normalized, deny_detail, false);
+        let outcome = match eval.mode {
+            PolicyMode::Deny => "DENIED by deny rule",
+            PolicyMode::Allow => "DENIED by allow rule (not in allow list)",
+        };
+        return build_result(outcome, steps, normalized, policy_detail, false);
     }
-    steps.push((
-        "deny rules",
-        StepResult::Ok(format!("{} rules checked, 0 matched", eval.rules_checked)),
-    ));
+
+    let ok_detail = match eval.mode {
+        PolicyMode::Deny => format!("{} rules checked, 0 matched", eval.rules_checked),
+        PolicyMode::Allow => {
+            format!(
+                "matched '{}' ({} rules)",
+                eval.matched_rule.as_ref().unwrap(),
+                eval.rules_checked
+            )
+        }
+    };
+    steps.push((step_label, StepResult::Ok(ok_detail)));
 
     // Step 4: profile allows?
     let outcome = if !profile.allows_command(command) {
@@ -124,7 +145,7 @@ pub fn evaluate(
     };
 
     let hook_notice = hooks_dir.join("pre-exec").exists();
-    build_result(outcome, steps, normalized, deny_detail, hook_notice)
+    build_result(outcome, steps, normalized, policy_detail, hook_notice)
 }
 
 fn format_normalized(normalized: &[NormalizedArg]) -> String {
@@ -171,7 +192,7 @@ pub fn print_result(result: &WhyResult) {
         }
     }
 
-    if let Some(ref detail) = result.deny_detail {
+    if let Some(ref detail) = result.policy_detail {
         eprintln!("     {detail}");
     }
 
@@ -382,5 +403,68 @@ mod tests {
         assert!(matches!(result.steps[1].1, StepResult::Ok(_)));
         assert!(matches!(result.steps[2].1, StepResult::Ok(_)));
         assert!(matches!(result.steps[3].1, StepResult::Ok(_)));
+    }
+
+    #[test]
+    fn allow_mode_denied_at_step_3() {
+        let mut registry = CommandRegistry::new();
+        registry
+            .load_from_str(
+                "aws",
+                r#"
+[command]
+bin = "aws"
+
+[allow]
+args = ["s3", "sts"]
+"#,
+            )
+            .unwrap();
+        let enabled = enabled_set(&["aws"]);
+        let profile = Profile {
+            commands: vec![],
+            env: None,
+        };
+        let hooks = std::path::PathBuf::from("/nonexistent");
+        let args: Vec<String> = vec!["iam".into(), "create-access-key".into()];
+
+        let result = evaluate(
+            "default", &profile, "aws", &args, &enabled, &registry, &hooks,
+        );
+
+        assert!(result.outcome.contains("DENIED"));
+        assert!(result.outcome.contains("allow"));
+        assert!(matches!(result.steps[2].1, StepResult::Denied(_)));
+    }
+
+    #[test]
+    fn allow_mode_passes_step_3() {
+        let mut registry = CommandRegistry::new();
+        registry
+            .load_from_str(
+                "aws",
+                r#"
+[command]
+bin = "aws"
+
+[allow]
+args = ["s3", "sts"]
+"#,
+            )
+            .unwrap();
+        let enabled = enabled_set(&["aws"]);
+        let profile = Profile {
+            commands: vec![],
+            env: None,
+        };
+        let hooks = std::path::PathBuf::from("/nonexistent");
+        let args: Vec<String> = vec!["s3".into(), "ls".into()];
+
+        let result = evaluate(
+            "default", &profile, "aws", &args, &enabled, &registry, &hooks,
+        );
+
+        assert_eq!(result.outcome, "ALLOWED");
+        assert!(matches!(result.steps[2].1, StepResult::Ok(_)));
     }
 }

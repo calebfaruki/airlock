@@ -42,11 +42,12 @@
         Give agents access to CLI commands without exposing credentials. Commands proxy from a container-side shim to a host-side daemon. The container never holds a secret.
       </p>
 
-      <div class="relative group mb-6">
+      <div class="relative group mb-4">
         <pre class="bg-zinc-900 border border-white/10 px-4 py-3 text-sm overflow-x-auto"><code id="install-cmd">curl -fsSL https://raw.githubusercontent.com/calebfaruki/airlock/main/install.sh | sh</code></pre>
         <button onclick="navigator.clipboard.writeText(document.getElementById('install-cmd').textContent).then(()=>{this.textContent='copied';setTimeout(()=>this.textContent='copy',1500)})"
           class="absolute top-2 right-2 text-xs text-gray-500 hover:text-white border border-white/10 px-2 py-1 transition-colors">copy</button>
       </div>
+      <p class="text-xs text-gray-600 mb-6">Remote deployment: <code class="text-gray-500">docker pull ghcr.io/calebfaruki/airlock-daemon:latest</code></p>
 
       <a href="https://github.com/calebfaruki/airlock" class="text-sm text-gray-500 hover:text-white transition-colors">github.com/calebfaruki/airlock</a>
     </section>
@@ -89,7 +90,7 @@ docker run -e GITHUB_TOKEN=$GITHUB_TOKEN agent-image</pre>
           </div>
         </div>
         <div class="border border-white/10 sm:border-l-0 bg-zinc-900 px-5 py-4">
-          <div class="text-gray-300 font-medium mb-3">Host</div>
+          <div class="text-gray-300 font-medium mb-3">Daemon</div>
           <div class="text-gray-500 space-y-1">
             <div>airlock daemon receives from socket</div>
             <div class="text-gray-600 pl-4">&darr;</div>
@@ -99,6 +100,10 @@ docker run -e GITHUB_TOKEN=$GITHUB_TOKEN agent-image</pre>
           </div>
         </div>
       </div>
+
+      <p class="text-xs text-gray-600 mt-4">
+        Local: daemon runs on the host. Remote: daemon runs as a shared container alongside agents in compose or k8s.
+      </p>
 
     </section>
 
@@ -245,26 +250,27 @@ cat > ~/.config/airlock/config.toml &lt;&lt; 'EOF'
 enable = ["git", "terraform"]
 EOF
 
-<span class="text-gray-600"># Create a profile</span>
-cat > ~/.config/airlock/profiles/default.toml &lt;&lt; 'EOF'
+<span class="text-gray-600"># Create an agent</span>
+mkdir -p my-agent
+cat > my-agent/airlock.toml &lt;&lt; 'EOF'
 commands = ["git", "terraform"]
 
 [env]
 set = { AWS_PROFILE = "readonly" }
 EOF
 
-<span class="text-gray-600"># Run your container</span>
-docker run \
-  -v ~/.config/airlock/sockets/default.sock:/run/docker-airlock.sock \
-  your-agent-image</pre>
+<span class="text-gray-600"># Register and start</span>
+echo '[my-agent]' > agents.toml
+echo 'path = "'$(pwd)/my-agent'"' >> agents.toml
+airlock-daemon start --agents agents.toml</pre>
     </section>
 
     <!-- Commands -->
     <section class="mb-20">
-      <h2 class="border-b border-white/20 text-lg font-medium mb-6">Secure defaults. Eject to customize.</h2>
+      <h2 class="border-b border-white/20 text-lg font-medium mb-6">Secure defaults. Override per agent.</h2>
 
       <p class="text-sm text-gray-400 mb-6 leading-relaxed">
-        Each command is a TOML file defining deny rules, environment hardening, and execution constraints. Start with the built-ins. Need more or less security? Run <code class="text-gray-300">airlock eject &lt;command&gt;</code> to get a copy you can edit. Need a command we don't ship? Create a TOML file and add it to your enable list.
+        Each command is a TOML file defining deny rules, environment hardening, and execution constraints. Start with the built-ins. Need more or less security? Add a <code class="text-gray-300">commands/&lt;name&gt;.toml</code> to the agent's directory to override a built-in. Need a command we don't ship? Create a TOML file and add it to your enable list.
       </p>
 
       <div class="overflow-x-auto">

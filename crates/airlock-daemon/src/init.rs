@@ -124,9 +124,7 @@ pub fn create_directories(config: &InitConfig) -> Result<Vec<String>, Box<dyn st
     let mut created = Vec::new();
 
     let dirs = [
-        config.config_dir.join("hooks"),
-        config.config_dir.join("commands"),
-        config.config_dir.join("profiles"),
+        config.config_dir.clone(),
         config.sockets_dir.clone(),
         config.data_dir.clone(),
     ];
@@ -405,20 +403,17 @@ mod idempotent_setup {
     }
 
     #[test]
-    fn init_creates_directory_structure() {
-        let base = std::env::temp_dir().join(format!("airlock-init-test-{}", std::process::id()));
+    fn init_creates_only_daemon_dirs() {
+        let base = std::env::temp_dir().join(format!("airlock-rg-init-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let config = temp_config(&base);
 
         let created = create_directories(&config).unwrap();
-        assert_eq!(created.len(), 5);
-        assert!(config.config_dir.join("hooks").is_dir());
-        assert!(config.config_dir.join("commands").is_dir());
-        assert!(config.config_dir.join("profiles").is_dir());
+        assert_eq!(created.len(), 3);
+        assert!(config.config_dir.is_dir());
         assert!(config.sockets_dir.is_dir());
         assert!(config.data_dir.is_dir());
 
-        // Idempotent: second call creates nothing
         let created = create_directories(&config).unwrap();
         assert!(created.is_empty());
 

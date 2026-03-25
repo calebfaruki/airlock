@@ -1,11 +1,14 @@
 use airlock_daemon::commands::CommandRegistry;
 use airlock_daemon::config::{self, Config};
 use airlock_daemon::doctor;
-use airlock_daemon::hooks::HookRunner;
+use airlock_daemon::hooks::HookResolver;
 use airlock_daemon::logging::AuditLogger;
+use airlock_daemon::paths::DaemonPaths;
 use airlock_daemon::profile::Profile;
 use airlock_daemon::test;
-use airlock_daemon::{bind_profile_socket, run_daemon, ConcurrencyLocks, MountCache, ProfileMap};
+use airlock_daemon::{
+    bind_profile_socket, run_daemon, ConcurrencyLocks, MountCache, ProfileEntry, ProfileMap,
+};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::PathBuf;
@@ -13,36 +16,15 @@ use std::sync::Arc;
 use tokio::net::UnixListener;
 use tokio::sync::RwLock;
 
-fn config_dir() -> PathBuf {
-    let home = env::var("HOME").expect("HOME not set");
-    PathBuf::from(home).join(".config").join("airlock")
-}
-
-fn profiles_dir() -> PathBuf {
-    config_dir().join("profiles")
-}
-
-fn sockets_dir() -> PathBuf {
-    config_dir().join("sockets")
-}
-
-fn user_commands_dir() -> PathBuf {
-    config_dir().join("commands")
-}
-
-fn hooks_dir() -> PathBuf {
-    config_dir().join("hooks")
-}
-
-fn load_registry() -> CommandRegistry {
+fn load_registry(paths: &DaemonPaths) -> CommandRegistry {
     let mut registry = CommandRegistry::new();
     registry.load_builtins();
-    registry.load_user_overrides(&user_commands_dir());
+    registry.load_user_overrides(&paths.user_commands_dir(), None);
     registry
 }
 
-fn require_enabled_commands() -> (Config, HashSet<String>) {
-    let app_config = Config::load(&config_dir());
+fn require_enabled_commands(paths: &DaemonPaths) -> (Config, HashSet<String>) {
+    let app_config = Config::load(&paths.config_dir);
     let enabled: HashSet<String> = match &app_config.commands.enable {
         Some(list) if list.is_empty() => {
             eprintln!(
@@ -59,14 +41,14 @@ fn require_enabled_commands() -> (Config, HashSet<String>) {
     (app_config, enabled)
 }
 
-fn load_filtered_registry(enabled: &HashSet<String>) -> CommandRegistry {
+fn load_filtered_registry(paths: &DaemonPaths, enabled: &HashSet<String>) -> CommandRegistry {
     let mut registry = CommandRegistry::new();
     registry.load_builtins_filtered(enabled);
-    registry.load_user_overrides_filtered(&user_commands_dir(), enabled);
+    registry.load_user_overrides(&paths.user_commands_dir(), Some(enabled));
     registry
 }
 
-fn show_command(args: &[String]) {
+fn show_command(paths: &DaemonPaths, args: &[String]) {
     let cmd = match args.first() {
         Some(c) => c,
         None => {
@@ -75,7 +57,7 @@ fn show_command(args: &[String]) {
         }
     };
 
-    let registry = load_registry();
+    let registry = load_registry(paths);
     match registry.active_toml(cmd) {
         Some(toml) => print!("{toml}"),
         None => {
@@ -85,7 +67,7 @@ fn show_command(args: &[String]) {
     }
 }
 
-fn diff_command(args: &[String]) {
+fn diff_command(paths: &DaemonPaths, args: &[String]) {
     let cmd = match args.first() {
         Some(c) => c,
         None => {
@@ -94,7 +76,7 @@ fn diff_command(args: &[String]) {
         }
     };
 
-    let registry = load_registry();
+    let registry = load_registry(paths);
 
     if !registry.has_user_override(cmd) {
         if registry.has_builtin(cmd) {
@@ -141,7 +123,7 @@ fn diff_command(args: &[String]) {
     }
 }
 
-fn eject_command(args: &[String]) {
+fn eject_command(paths: &DaemonPaths, args: &[String]) {
     let cmd = match args.first() {
         Some(c) => c,
         None => {
@@ -161,7 +143,7 @@ fn eject_command(args: &[String]) {
         }
     };
 
-    let dir = user_commands_dir();
+    let dir = paths.user_commands_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
         eprintln!("failed to create {}: {e}", dir.display());
         std::process::exit(1);
@@ -183,6 +165,7 @@ fn eject_command(args: &[String]) {
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = env::args().collect();
+    let paths = DaemonPaths::detect();
 
     let subcommand = args.get(1).map(|s| s.as_str()).unwrap_or("help");
 
@@ -193,15 +176,15 @@ async fn main() {
             return;
         }
         "show" => {
-            show_command(&args[2..]);
+            show_command(&paths, &args[2..]);
             return;
         }
         "diff" => {
-            diff_command(&args[2..]);
+            diff_command(&paths, &args[2..]);
             return;
         }
         "eject" => {
-            eject_command(&args[2..]);
+            eject_command(&paths, &args[2..]);
             return;
         }
         "init" => {
@@ -224,7 +207,7 @@ async fn main() {
             let mut registry = CommandRegistry::new();
             registry.load_builtins();
 
-            let user_dir = user_commands_dir();
+            let user_dir = paths.user_commands_dir();
             let mut has_errors = false;
 
             if user_dir.exists() {
@@ -266,8 +249,8 @@ async fn main() {
             return;
         }
         "doctor" => {
-            let (_, enabled) = require_enabled_commands();
-            let registry = load_filtered_registry(&enabled);
+            let (_, enabled) = require_enabled_commands(&paths);
+            let registry = load_filtered_registry(&paths, &enabled);
 
             let cmd_results = doctor::check_commands(&registry);
             doctor::print_results("Commands", &cmd_results);
@@ -297,10 +280,10 @@ async fn main() {
             };
             let cmd_args: Vec<String> = args[4..].to_vec();
 
-            let (_, enabled) = require_enabled_commands();
-            let registry = load_filtered_registry(&enabled);
+            let (_, enabled) = require_enabled_commands(&paths);
+            let registry = load_filtered_registry(&paths, &enabled);
 
-            let profile_path = profiles_dir().join(format!("{profile_name}.toml"));
+            let profile_path = paths.profiles_dir().join(format!("{profile_name}.toml"));
             let profile_content = match std::fs::read_to_string(&profile_path) {
                 Ok(c) => c,
                 Err(_) => {
@@ -326,7 +309,8 @@ async fn main() {
                 &cmd_args,
                 &enabled,
                 &registry,
-                &hooks_dir(),
+                &paths.hooks_dir(),
+                None,
             );
             test::print_result(&result);
 
@@ -336,7 +320,7 @@ async fn main() {
                 profile_name,
                 command,
                 &cmd_args,
-                &sockets_dir(),
+                &paths.sockets_dir,
                 static_allowed,
             );
             test::print_live_result(&live);
@@ -352,8 +336,8 @@ async fn main() {
             let sub = args.get(2).map(|s| s.as_str()).unwrap_or("help");
             match sub {
                 "list" => {
-                    let prof_dir = profiles_dir();
-                    let sock_dir = sockets_dir();
+                    let prof_dir = paths.profiles_dir();
+                    let sock_dir = &paths.sockets_dir;
                     if !prof_dir.exists() {
                         eprintln!("no profiles directory at {}", prof_dir.display());
                         std::process::exit(1);
@@ -387,7 +371,7 @@ async fn main() {
                             std::process::exit(1);
                         }
                     };
-                    let path = profiles_dir().join(format!("{name}.toml"));
+                    let path = paths.profiles_dir().join(format!("{name}.toml"));
                     match std::fs::read_to_string(&path) {
                         Ok(content) => print!("{content}"),
                         Err(e) => {
@@ -412,8 +396,8 @@ async fn main() {
     }
 
     // Load profiles
-    let prof_dir = profiles_dir();
-    let mut profile_map: HashMap<String, Profile> = HashMap::new();
+    let prof_dir = paths.profiles_dir();
+    let mut profile_map: HashMap<String, ProfileEntry> = HashMap::new();
 
     if prof_dir.exists() {
         if let Ok(entries) = std::fs::read_dir(&prof_dir) {
@@ -435,7 +419,13 @@ async fn main() {
                 };
                 match Profile::parse(&content) {
                     Ok(profile) => {
-                        profile_map.insert(name, profile);
+                        profile_map.insert(
+                            name,
+                            ProfileEntry {
+                                profile,
+                                agent_name: None,
+                            },
+                        );
                     }
                     Err(e) => {
                         eprintln!("airlock: failed to parse profile '{}': {e}", path.display());
@@ -447,16 +437,12 @@ async fn main() {
     }
 
     if profile_map.is_empty() {
-        eprintln!(
-            "airlock: no profiles found in {} — create at least one profile to start",
-            prof_dir.display()
-        );
-        std::process::exit(1);
+        eprintln!("airlock: no profiles found — daemon started with no active sockets");
     }
 
     // Bind sockets
-    let sock_dir = sockets_dir();
-    if let Err(e) = std::fs::create_dir_all(&sock_dir) {
+    let sock_dir = &paths.sockets_dir;
+    if let Err(e) = std::fs::create_dir_all(sock_dir) {
         eprintln!(
             "airlock: failed to create sockets directory {}: {e}",
             sock_dir.display()
@@ -493,7 +479,7 @@ async fn main() {
 
     let profiles: ProfileMap = Arc::new(profile_map);
 
-    let (app_config, enabled_commands) = require_enabled_commands();
+    let (app_config, enabled_commands) = require_enabled_commands(&paths);
     let log_path = config::expand_tilde(&app_config.log.path);
     if let Some(dir) = std::path::Path::new(&log_path).parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -505,7 +491,7 @@ async fn main() {
     ));
 
     let mount_cache: MountCache = Arc::new(RwLock::new(HashMap::new()));
-    let registry = load_filtered_registry(&enabled_commands);
+    let registry = load_filtered_registry(&paths, &enabled_commands);
     eprintln!(
         "airlock: enabled commands: {}",
         registry.command_names().join(", ")
@@ -516,7 +502,7 @@ async fn main() {
     }
     let registry = Arc::new(registry);
     let cmd_locks: ConcurrencyLocks = Arc::new(RwLock::new(HashMap::new()));
-    let hook_runner = Arc::new(HookRunner::new(hooks_dir()));
+    let hook_resolver = Arc::new(HookResolver::new(paths.hooks_dir()));
 
     run_daemon(
         listeners,
@@ -524,7 +510,7 @@ async fn main() {
         mount_cache,
         registry,
         cmd_locks,
-        hook_runner,
+        hook_resolver,
         logger,
     )
     .await;

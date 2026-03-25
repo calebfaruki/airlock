@@ -132,7 +132,7 @@ docker run -e GITHUB_TOKEN=$GITHUB_TOKEN agent-image</pre>
       </div>
 
       <p class="text-xs text-gray-600 mt-6">
-        Use HTTP proxies for API keys. Use airlock for everything else.
+        Use <a href="https://calebfaruki.github.io/tightbeam" class="underline hover:text-white transition-colors">Tightbeam</a> for LLM API keys. Use Airlock for CLI credentials. Run both.
       </p>
     </section>
 
@@ -195,6 +195,40 @@ docker run -e GITHUB_TOKEN=$GITHUB_TOKEN agent-image</pre>
 
       <p class="text-xs text-gray-600 leading-relaxed">
         Maps to <a href="https://genai.owasp.org" class="underline hover:text-white transition-colors">OWASP Gen AI Top 10</a> risks LLM02, LLM05, and LLM06. Airlock operates at the tool layer &mdash; model-layer risks require model-layer mitigations.
+      </p>
+    </section>
+
+    <!-- Ecosystem -->
+    <section class="mb-20">
+      <h2 class="border-b border-white/20 text-lg font-medium mb-6">Part of the same ecosystem</h2>
+
+      <p class="text-sm text-gray-400 mb-8 leading-relaxed">
+        Airlock and <a href="https://calebfaruki.github.io/tightbeam" class="text-gray-300 underline hover:text-white transition-colors">Tightbeam</a> solve the same problem at different layers. Both are Rust binaries, JSON-RPC 2.0 over unix sockets, same daemon lifecycle pattern.
+      </p>
+
+      <div class="grid sm:grid-cols-2 gap-8">
+        <div>
+          <h3 class="text-sm font-medium text-gray-300 mb-3">Airlock</h3>
+          <ul class="space-y-2 text-sm text-gray-400">
+            <li>CLI credential isolation</li>
+            <li>Proxies git, aws, terraform, ssh, docker</li>
+            <li>Deny rules, per-tool arg restrictions</li>
+            <li>Stateless &mdash; each command is independent</li>
+          </ul>
+        </div>
+        <div>
+          <h3 class="text-sm font-medium text-gray-300 mb-3">Tightbeam</h3>
+          <ul class="space-y-2 text-sm text-gray-500">
+            <li>LLM API credential isolation</li>
+            <li>Proxies LLM calls, human messages, MCP requests</li>
+            <li>Conversation accumulation, history ownership</li>
+            <li>Conversational &mdash; persistent session, tool loops</li>
+          </ul>
+        </div>
+      </div>
+
+      <p class="text-xs text-gray-600 mt-6">
+        Use Airlock for CLI tools. Use Tightbeam for LLM APIs. Run both.
       </p>
     </section>
 
@@ -273,6 +307,7 @@ docker run \
       <a href="https://api.securityscorecards.dev/projects/github.com/calebfaruki/airlock/badge" class="hover:text-white transition-colors">
         <img src="https://api.securityscorecards.dev/projects/github.com/calebfaruki/airlock/badge" alt="OpenSSF Scorecard" class="h-5 inline">
       </a>
+      <a href="https://calebfaruki.github.io/tightbeam" class="hover:text-white transition-colors">Tightbeam</a>
       <span>AGPL-3.0</span>
     </footer>
 

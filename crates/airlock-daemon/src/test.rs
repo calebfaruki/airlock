@@ -23,6 +23,7 @@ pub struct WhyResult {
     pub hook_notice: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate(
     profile_name: &str,
     profile: &Profile,
@@ -31,6 +32,7 @@ pub fn evaluate(
     enabled: &HashSet<String>,
     registry: &CommandRegistry,
     hooks_dir: &Path,
+    agent_name: Option<&str>,
 ) -> WhyResult {
     let mut steps: Vec<(&str, StepResult)> = Vec::with_capacity(4);
     let mut normalized = None;
@@ -74,7 +76,7 @@ pub fn evaluate(
     ));
 
     // Step 2: module found (informational — always succeeds if step 1 passed)
-    let module = registry.get(command).unwrap();
+    let module = registry.get_for_agent(command, agent_name).unwrap();
     let source = if registry.has_user_override(command) {
         "user override"
     } else {
@@ -330,6 +332,7 @@ mod tests {
             &enabled,
             &registry,
             &hooks,
+            None,
         );
 
         assert!(result.outcome.contains("DENIED"));
@@ -351,7 +354,7 @@ mod tests {
         let args: Vec<String> = vec!["-cevil".to_string(), "status".to_string()];
 
         let result = evaluate(
-            "default", &profile, "git", &args, &enabled, &registry, &hooks,
+            "default", &profile, "git", &args, &enabled, &registry, &hooks, None,
         );
 
         assert!(result.outcome.contains("DENIED by deny rule"));
@@ -373,7 +376,7 @@ mod tests {
         let args: Vec<String> = vec!["status".to_string()];
 
         let result = evaluate(
-            "agent-a", &profile, "git", &args, &enabled, &registry, &hooks,
+            "agent-a", &profile, "git", &args, &enabled, &registry, &hooks, None,
         );
 
         assert!(result.outcome.contains("DENIED by profile"));
@@ -395,7 +398,7 @@ mod tests {
         let args: Vec<String> = vec!["push".to_string(), "origin".to_string()];
 
         let result = evaluate(
-            "default", &profile, "git", &args, &enabled, &registry, &hooks,
+            "default", &profile, "git", &args, &enabled, &registry, &hooks, None,
         );
 
         assert_eq!(result.outcome, "ALLOWED");
@@ -429,7 +432,7 @@ args = ["s3", "sts"]
         let args: Vec<String> = vec!["iam".into(), "create-access-key".into()];
 
         let result = evaluate(
-            "default", &profile, "aws", &args, &enabled, &registry, &hooks,
+            "default", &profile, "aws", &args, &enabled, &registry, &hooks, None,
         );
 
         assert!(result.outcome.contains("DENIED"));
@@ -461,7 +464,7 @@ args = ["s3", "sts"]
         let args: Vec<String> = vec!["s3".into(), "ls".into()];
 
         let result = evaluate(
-            "default", &profile, "aws", &args, &enabled, &registry, &hooks,
+            "default", &profile, "aws", &args, &enabled, &registry, &hooks, None,
         );
 
         assert_eq!(result.outcome, "ALLOWED");

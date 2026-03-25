@@ -1,0 +1,5 @@
+FROM scratch
+ARG TARGETARCH
+COPY airlock-daemon-linux-musl-${TARGETARCH} /usr/local/bin/airlock-daemon
+ENTRYPOINT ["airlock-daemon"]
+CMD ["start"]

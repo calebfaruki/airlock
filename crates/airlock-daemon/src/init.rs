@@ -6,6 +6,7 @@ pub struct InitConfig {
     pub data_dir: PathBuf,
     pub bin_path: PathBuf,
     pub sockets_dir: PathBuf,
+    pub agents_path: Option<PathBuf>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -28,6 +29,7 @@ impl InitConfig {
             data_dir: home.join(".local/share/airlock"),
             bin_path,
             sockets_dir: home.join(".config/airlock/sockets"),
+            agents_path: None,
         }
     }
 }
@@ -162,7 +164,11 @@ fn write_service_file(
 
 // --- systemd (Linux) ---
 
-pub fn generate_systemd_unit(bin_path: &Path) -> String {
+pub fn generate_systemd_unit(bin_path: &Path, agents_path: Option<&Path>) -> String {
+    let agents_flag = match agents_path {
+        Some(p) => format!(" --agents {}", p.display()),
+        None => String::new(),
+    };
     format!(
         "[Unit]\n\
          Description=Airlock daemon — CLI proxy for Docker credential isolation\n\
@@ -170,14 +176,15 @@ pub fn generate_systemd_unit(bin_path: &Path) -> String {
          \n\
          [Service]\n\
          Type=simple\n\
-         ExecStart={} start\n\
+         ExecStart={} start{}\n\
          Restart=on-failure\n\
          RestartSec=5\n\
          Environment=RUST_LOG=info\n\
          \n\
          [Install]\n\
          WantedBy=default.target\n",
-        bin_path.display()
+        bin_path.display(),
+        agents_flag
     )
 }
 
@@ -189,7 +196,7 @@ fn systemd_unit_path() -> PathBuf {
 fn install_systemd_service(
     config: &InitConfig,
 ) -> Result<ServiceResult, Box<dyn std::error::Error>> {
-    let content = generate_systemd_unit(&config.bin_path);
+    let content = generate_systemd_unit(&config.bin_path, config.agents_path.as_deref());
     let path = systemd_unit_path();
     let result = write_service_file(&path, &content)?;
 
@@ -251,7 +258,18 @@ fn remove_systemd_service(_config: &InitConfig) -> Result<(), Box<dyn std::error
 
 // --- launchd (macOS) ---
 
-pub fn generate_launchd_plist(bin_path: &Path, data_dir: &Path) -> String {
+pub fn generate_launchd_plist(
+    bin_path: &Path,
+    data_dir: &Path,
+    agents_path: Option<&Path>,
+) -> String {
+    let agents_args = match agents_path {
+        Some(p) => format!(
+            "\n        <string>--agents</string>\n        <string>{}</string>",
+            p.display()
+        ),
+        None => String::new(),
+    };
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -262,7 +280,7 @@ pub fn generate_launchd_plist(bin_path: &Path, data_dir: &Path) -> String {
     <key>ProgramArguments</key>
     <array>
         <string>{}</string>
-        <string>start</string>
+        <string>start</string>{agents_args}
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -305,7 +323,11 @@ fn get_uid() -> String {
 fn install_launchd_service(
     config: &InitConfig,
 ) -> Result<ServiceResult, Box<dyn std::error::Error>> {
-    let content = generate_launchd_plist(&config.bin_path, &config.data_dir);
+    let content = generate_launchd_plist(
+        &config.bin_path,
+        &config.data_dir,
+        config.agents_path.as_deref(),
+    );
     let path = launchd_plist_path();
     write_service_file(&path, &content)
 }
@@ -399,6 +421,7 @@ mod idempotent_setup {
             data_dir: base.join("share/airlock"),
             bin_path: PathBuf::from("/usr/local/bin/airlock-daemon"),
             sockets_dir: base.join("sockets"),
+            agents_path: None,
         }
     }
 
@@ -422,7 +445,8 @@ mod idempotent_setup {
 
     #[test]
     fn init_generates_correct_systemd_unit() {
-        let content = generate_systemd_unit(Path::new("/home/user/.local/bin/airlock-daemon"));
+        let content =
+            generate_systemd_unit(Path::new("/home/user/.local/bin/airlock-daemon"), None);
         assert!(content.contains("ExecStart=/home/user/.local/bin/airlock-daemon start"));
         assert!(content.contains("Type=simple"));
         assert!(content.contains("Restart=on-failure"));
@@ -434,6 +458,7 @@ mod idempotent_setup {
         let content = generate_launchd_plist(
             Path::new("/usr/local/bin/airlock-daemon"),
             Path::new("/Users/test/.local/share/airlock"),
+            None,
         );
         assert!(content.contains("<string>dev.airlock.daemon</string>"));
         assert!(content.contains("<string>/usr/local/bin/airlock-daemon</string>"));

@@ -6,6 +6,7 @@ pub mod init;
 pub mod logging;
 pub mod paths;
 pub mod profile;
+pub mod registration;
 pub mod test;
 
 use commands::{CommandModule, CommandRegistry};

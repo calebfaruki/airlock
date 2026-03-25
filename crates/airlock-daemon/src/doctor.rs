@@ -25,7 +25,7 @@ fn resolve_binary(bin: &str) -> Option<String> {
 pub fn check_commands(registry: &CommandRegistry) -> Vec<CheckResult> {
     let mut results = Vec::new();
     for name in registry.command_names() {
-        let module = registry.get(name).unwrap();
+        let module = registry.get_for_agent(name, None).unwrap();
         let bin = &module.command.bin;
         match resolve_binary(bin) {
             Some(path) => results.push(CheckResult {

@@ -1,7 +1,9 @@
 use airlock_daemon::commands::CommandRegistry;
 use airlock_daemon::hooks::HookResolver;
 use airlock_daemon::logging::AuditLogger;
+use airlock_daemon::paths::AgentPaths;
 use airlock_daemon::profile::Profile;
+use airlock_daemon::registration;
 use airlock_daemon::{
     bind_profile_socket, run_daemon, ConcurrencyLocks, MountCache, ProfileEntry, ProfileMap,
 };
@@ -40,7 +42,7 @@ fn default_profiles() -> ProfileMap {
                 commands: vec![],
                 env: None,
             },
-            agent_name: None,
+            agent_name: Some("default".to_string()),
         },
     );
     Arc::new(map)
@@ -66,13 +68,15 @@ async fn start_daemon_with_profile(
 ) -> tokio::task::JoinHandle<()> {
     let profile_name = profiles.keys().next().unwrap().clone();
     let listener = bind_profile_socket(sock_path).unwrap();
-    let listeners = vec![(profile_name, listener)];
+    let listeners = vec![(profile_name.clone(), listener)];
     let cache: MountCache = Arc::new(RwLock::new(HashMap::new()));
     let mut registry = CommandRegistry::new();
     registry.load_builtins();
     let registry = Arc::new(registry);
     let locks: ConcurrencyLocks = Arc::new(RwLock::new(HashMap::new()));
-    let hook_resolver = Arc::new(HookResolver::new(hooks_dir.to_path_buf()));
+    let mut hook_resolver = HookResolver::new();
+    hook_resolver.add_agent(profile_name, hooks_dir.to_path_buf());
+    let hook_resolver = Arc::new(hook_resolver);
     let logger = Arc::new(AuditLogger::new(log_path.to_path_buf(), 50, 5));
     tokio::spawn(async move {
         run_daemon(
@@ -99,7 +103,7 @@ async fn start_daemon_with_registry(
     let cache: MountCache = Arc::new(RwLock::new(HashMap::new()));
     let registry = Arc::new(registry);
     let locks: ConcurrencyLocks = Arc::new(RwLock::new(HashMap::new()));
-    let hook_resolver = Arc::new(HookResolver::new(unique_hooks_dir()));
+    let hook_resolver = Arc::new(HookResolver::new());
     let logger = Arc::new(AuditLogger::new(unique_log_path(), 50, 5));
     tokio::spawn(async move {
         run_daemon(
@@ -466,7 +470,7 @@ exit 0
             "restricted".to_string(),
             ProfileEntry {
                 profile: Profile::parse(r#"commands = ["git"]"#).unwrap(),
-                agent_name: None,
+                agent_name: Some("restricted".to_string()),
             },
         );
         let profiles: ProfileMap = Arc::new(map);
@@ -1083,5 +1087,149 @@ mod smoke_test_issue_22 {
         }
 
         let _ = std::fs::remove_file(&sock);
+    }
+}
+
+mod agent_registration {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn setup_agent_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "airlock-integ-{}-{}-{}",
+            name,
+            std::process::id(),
+            TEST_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("airlock.toml"), "commands = []\n").unwrap();
+        dir
+    }
+
+    fn write_registration_file(agents: &[(&str, &std::path::Path)]) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "airlock-agents-{}-{}.toml",
+            std::process::id(),
+            TEST_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        let mut content = String::new();
+        for (name, dir) in agents {
+            content.push_str(&format!("[{}]\npath = \"{}\"\n\n", name, dir.display()));
+        }
+        std::fs::write(&path, &content).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn registration_loads_profiles_and_routes_requests() {
+        let agent_dir = setup_agent_dir("route");
+        let reg_file = write_registration_file(&[("test-agent", &agent_dir)]);
+
+        let registrations = registration::load_registration(&reg_file).unwrap();
+        assert_eq!(registrations.len(), 1);
+        assert_eq!(registrations[0].name, "test-agent");
+
+        let agent = AgentPaths::new(registrations[0].path.clone());
+        let profile = agent.load_profile().unwrap();
+
+        let mut map = HashMap::new();
+        map.insert(
+            "test-agent".to_string(),
+            ProfileEntry {
+                profile,
+                agent_name: Some("test-agent".to_string()),
+            },
+        );
+        let profiles: ProfileMap = Arc::new(map);
+
+        let sock = test_socket_path("reg-route");
+        let _handle =
+            start_daemon_with_profile(&sock, &unique_hooks_dir(), &unique_log_path(), profiles)
+                .await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"git","args":["status"]}}"#;
+        let lines = send_and_collect(&sock, request).await;
+        assert!(!lines.is_empty());
+
+        let final_line = lines.last().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(final_line).unwrap();
+        assert!(
+            parsed.get("result").is_some() || parsed.get("error").is_some(),
+            "expected a final response with result or error"
+        );
+
+        let _ = std::fs::remove_file(&sock);
+        let _ = std::fs::remove_dir_all(&agent_dir);
+        let _ = std::fs::remove_file(&reg_file);
+    }
+
+    #[tokio::test]
+    async fn agent_override_routes_through_registry() {
+        let agent_dir = setup_agent_dir("override");
+
+        let cmds_dir = agent_dir.join("commands");
+        std::fs::create_dir_all(&cmds_dir).unwrap();
+        std::fs::write(
+            cmds_dir.join("git.toml"),
+            "[command]\nbin = \"git\"\n\n[deny]\nargs = []\n",
+        )
+        .unwrap();
+
+        let reg_file = write_registration_file(&[("override-agent", &agent_dir)]);
+        let registrations = registration::load_registration(&reg_file).unwrap();
+        let agent = AgentPaths::new(registrations[0].path.clone());
+        let profile = agent.load_profile().unwrap();
+
+        let mut map = HashMap::new();
+        map.insert(
+            "override-agent".to_string(),
+            ProfileEntry {
+                profile,
+                agent_name: Some("override-agent".to_string()),
+            },
+        );
+        let profiles: ProfileMap = Arc::new(map);
+
+        let sock = test_socket_path("reg-override");
+        let listener = bind_profile_socket(&sock).unwrap();
+        let listeners = vec![("override-agent".to_string(), listener)];
+        let cache: MountCache = Arc::new(RwLock::new(HashMap::new()));
+        let mut registry = CommandRegistry::new();
+        registry.load_builtins();
+        registry.load_agent_overrides("override-agent", &cmds_dir, None);
+        let registry = Arc::new(registry);
+        let locks: ConcurrencyLocks = Arc::new(RwLock::new(HashMap::new()));
+        let hook_resolver = Arc::new(HookResolver::new());
+        let logger = Arc::new(AuditLogger::new(unique_log_path(), 50, 5));
+        tokio::spawn(async move {
+            run_daemon(
+                listeners,
+                profiles,
+                cache,
+                registry,
+                locks,
+                hook_resolver,
+                logger,
+            )
+            .await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // git -c is denied by the builtin but allowed by the agent override (empty deny list)
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"exec","params":{"command":"git","args":["-c","user.name=test","status"]}}"#;
+        let lines = send_and_collect(&sock, request).await;
+
+        let final_line = lines.last().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(final_line).unwrap();
+        assert!(
+            parsed.get("result").is_some(),
+            "expected allowed (agent override has empty deny), got: {final_line}"
+        );
+
+        let _ = std::fs::remove_file(&sock);
+        let _ = std::fs::remove_dir_all(&agent_dir);
+        let _ = std::fs::remove_file(&reg_file);
     }
 }

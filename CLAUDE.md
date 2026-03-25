@@ -410,7 +410,11 @@ Container images (remote deployment):
 - `ghcr.io/<user>/airlock-daemon:latest` — daemon image (scratch + static musl binary)
 - `ghcr.io/<user>/airlock-shim:latest` — shim image (scratch + static musl binary)
 
-Start the daemon with agents: `airlock-daemon start --agents /path/to/agents.toml`
+Local: `airlock-daemon start --agents /path/to/agents.toml`
+
+Container: `airlock-daemon start --config /etc/airlock --sockets /run/airlock/sockets --agents /etc/airlock/agents.toml`
+
+`--config` and `--sockets` override the `$HOME`-based defaults. Both must be provided together, or neither (falls back to `$HOME`). The log path is specified in `config.toml` `[log] path` — container configs must use an absolute path.
 
 ## Security Invariants
 

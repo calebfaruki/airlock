@@ -114,7 +114,7 @@ The daemon and agent run as containers sharing a socket volume:
 services:
   airlock:
     image: ghcr.io/calebfaruki/airlock-daemon:latest
-    command: ["start", "--agents", "/etc/airlock/agents.toml"]
+    command: ["start", "--config", "/etc/airlock", "--sockets", "/run/airlock/sockets", "--agents", "/etc/airlock/agents.toml"]
     volumes:
       - sockets:/run/airlock/sockets
       - ./agents.toml:/etc/airlock/agents.toml:ro
@@ -134,7 +134,8 @@ volumes:
 ### Daemon
 
 ```sh
-airlock-daemon start --agents agents.toml  # Start with registered agents
+airlock-daemon start --agents agents.toml  # Local: start with registered agents
+airlock-daemon start --config /etc/airlock --sockets /run/sockets --agents agents.toml  # Container
 airlock-daemon start                       # Start with zero agents
 airlock-daemon init                        # Install as system service (systemd/launchd)
 airlock-daemon init --uninstall            # Remove system service

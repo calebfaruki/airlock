@@ -89,12 +89,33 @@ fn show_command(args: &[String]) {
 #[tokio::main]
 async fn main() {
     let raw_args: Vec<String> = env::args().collect();
-    let paths = DaemonPaths::detect();
 
     let agents_path: Option<PathBuf> = raw_args
         .windows(2)
         .find(|w| w[0] == "--agents")
         .map(|w| PathBuf::from(&w[1]));
+
+    let config_flag: Option<PathBuf> = raw_args
+        .windows(2)
+        .find(|w| w[0] == "--config")
+        .map(|w| PathBuf::from(&w[1]));
+
+    let sockets_flag: Option<PathBuf> = raw_args
+        .windows(2)
+        .find(|w| w[0] == "--sockets")
+        .map(|w| PathBuf::from(&w[1]));
+
+    let paths = match (&config_flag, &sockets_flag) {
+        (Some(config), Some(sockets)) => DaemonPaths {
+            config_dir: config.clone(),
+            sockets_dir: sockets.clone(),
+        },
+        (None, None) => DaemonPaths::detect(),
+        _ => {
+            eprintln!("airlock: --config and --sockets must both be provided, or neither");
+            std::process::exit(1);
+        }
+    };
 
     let args: Vec<String> = {
         let mut filtered = Vec::new();
@@ -104,7 +125,7 @@ async fn main() {
                 skip_next = false;
                 continue;
             }
-            if arg == "--agents" {
+            if arg == "--agents" || arg == "--config" || arg == "--sockets" {
                 skip_next = true;
                 continue;
             }

@@ -12,7 +12,7 @@ Three components:
 
 1. **Container-side shim** — a single static binary inside the container. Reads `argv[0]` to determine which command is being proxied (busybox pattern). Installed via symlinks in the user's Dockerfile.
 
-2. **Host-side daemon** — a long-running process on the host. Listens on a unix socket, receives JSON-RPC requests from the shim, executes commands with real credentials, and streams output back.
+2. **Daemon** — a long-running process on the host (local) or a shared container (remote compose/k8s). Listens on a unix socket, receives JSON-RPC requests from the shim, executes commands with real credentials, and streams output back.
 
 3. **Command directory** — TOML-based modules defining how each CLI tool is proxied. Built-in modules ship with conservative deny rules. Unknown commands are rejected.
 
@@ -36,13 +36,21 @@ Use network proxies for HTTP API keys. Use Airlock for everything else.
 
 ## Installation
 
-### Quick Install (Linux/macOS)
+### Local Install (Linux/macOS)
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/calebfaruki/airlock/main/install.sh | sh
 ```
 
 This downloads the daemon, installs it to `~/.local/bin/`, and runs `airlock init` to set up the system service.
+
+### Remote Deployment
+
+For Docker Compose or Kubernetes deployments, use the daemon container image:
+
+```sh
+docker pull ghcr.io/calebfaruki/airlock-daemon:latest
+```
 
 ### Container Setup
 
@@ -57,16 +65,20 @@ RUN ln -s airlock-shim /usr/local/airlock/bin/git \
     && ln -s airlock-shim /usr/local/airlock/bin/aws
 ```
 
-### Create a Profile
+### Agent Configuration
 
-Profiles scope credentials to individual containers. Each profile gets its own unix socket. Create at least one before starting the daemon:
+Each agent has its own working directory containing an `airlock.toml` profile:
+
+```
+my-agent/
+├── airlock.toml          # required — profile
+├── commands/             # optional — per-agent command overrides
+└── hooks/                # optional — per-agent hooks
+```
 
 ```sh
-# Minimal profile — all commands, no credential injection
-echo 'commands = []' > ~/.config/airlock/profiles/default.toml
-
-# Restricted profile — only git and gh, with a specific SSH key
-cat > ~/.config/airlock/profiles/agent-a.toml << 'EOF'
+mkdir -p my-agent
+cat > my-agent/airlock.toml << 'EOF'
 commands = ["git", "gh"]
 
 [env]
@@ -74,23 +86,47 @@ set = { GIT_SSH_COMMAND = "ssh -i ~/.ssh/project_a_key" }
 EOF
 ```
 
-### Docker Run
+Register agents in a TOML file:
 
-Mount the profile's socket into the container. The shim always connects to `/run/docker-airlock.sock` inside the container.
+```toml
+# agents.toml
+[my-agent]
+path = "/home/admin/agents/my-agent"
+```
+
+Start the daemon with: `airlock-daemon start --agents agents.toml`
+
+### Docker Run (Local)
+
+Mount the agent's socket into the container. The shim connects to `/run/docker-airlock.sock` inside the container.
 
 ```sh
 docker run \
-    -v ~/.config/airlock/sockets/agent-a.sock:/run/docker-airlock.sock \
+    -v ~/.config/airlock/sockets/my-agent.sock:/run/docker-airlock.sock \
     your-image
 ```
 
-Docker Desktop (macOS) — requires `--group-add 0` for non-root container users (VirtioFS remaps socket permissions to `root:root 0660`):
+### Docker Compose (Remote)
 
-```sh
-docker run \
-    --group-add 0 \
-    -v ~/.config/airlock/sockets/agent-a.sock:/run/docker-airlock.sock \
-    your-image
+The daemon and agent run as containers sharing a socket volume:
+
+```yaml
+services:
+  airlock:
+    image: ghcr.io/calebfaruki/airlock-daemon:latest
+    command: ["start", "--agents", "/etc/airlock/agents.toml"]
+    volumes:
+      - sockets:/run/airlock/sockets
+      - ./agents.toml:/etc/airlock/agents.toml:ro
+      - ./agents:/agents:ro
+
+  my-agent:
+    image: your-agent-image
+    volumes:
+      - sockets:/run/airlock/sockets
+
+volumes:
+  sockets:
 ```
 
 ## Usage
@@ -98,28 +134,22 @@ docker run \
 ### Daemon
 
 ```sh
-airlock-daemon start             # Run daemon in foreground
-airlock-daemon init              # Install as system service (systemd/launchd)
-airlock-daemon init --uninstall  # Remove system service
-airlock-daemon check             # Validate all command modules
-airlock-daemon doctor            # Check host binaries and Docker
-airlock-daemon test <p> <cmd> ...# Dry-run command through evaluation pipeline
-airlock-daemon version           # Print version
-airlock-daemon profile list      # List profiles and socket paths
-airlock-daemon profile show <n>  # Print a profile's TOML
-```
-
-### Command Directory
-
-```sh
-airlock-daemon show git     # Print active module (built-in or user override)
-airlock-daemon diff git     # Compare user override vs built-in
-airlock-daemon eject git    # Copy built-in to ~/.config/airlock/commands/ for editing
+airlock-daemon start --agents agents.toml  # Start with registered agents
+airlock-daemon start                       # Start with zero agents
+airlock-daemon init                        # Install as system service (systemd/launchd)
+airlock-daemon init --uninstall            # Remove system service
+airlock-daemon check --agents agents.toml  # Validate builtins + agent configs
+airlock-daemon doctor --agents agents.toml # Check host binaries and Docker
+airlock-daemon test --agents agents.toml my-agent git push  # Dry-run evaluation
+airlock-daemon version                     # Print version
+airlock-daemon show git                    # Print built-in module
+airlock-daemon profile list --agents agents.toml   # List agents and sockets
+airlock-daemon profile show --agents agents.toml my-agent  # Print agent profile
 ```
 
 ### Hooks
 
-Place executable scripts in `~/.config/airlock/hooks/`:
+Place executable scripts in the agent's `hooks/` directory:
 
 - `pre-exec` — receives the JSON-RPC request on stdin. Exit 0 to allow, non-zero to deny. Write modified JSON to stdout to rewrite the request.
 - `post-exec` — receives the JSON-RPC response on stdin. Exit 0 with modified JSON on stdout to alter output. Non-zero exit passes through the original response.
@@ -148,11 +178,15 @@ The daemon exits on startup if `commands.enable` is missing or empty. Only enabl
 
 Airlock ships with built-in modules for: `git`, `terraform`, `aws`, `ssh`, `docker`. Each has conservative deny rules. Run `airlock-daemon show <command>` to see the active configuration.
 
-To add a custom command, create a TOML file in `~/.config/airlock/commands/` and add the name to `commands.enable`:
+To add a custom command or override a built-in, create a TOML file in the agent's `commands/` directory and add the name to `commands.enable`:
 
 ```toml
+# my-agent/commands/deploy-cli.toml
 [command]
 bin = "deploy-cli"
+
+[deny]
+args = []
 ```
 
 ### Three-Layer Security Model
@@ -171,24 +205,23 @@ Each layer is independent. A mistake in one layer doesn't compromise the others.
 
 Built-in command modules ship with security hardening based on known attack vectors. Each module has a [`SECURITY.md`](crates/airlock-daemon/src/commands/builtins/) documenting the threat model behind every deny rule and environment variable.
 
-Run `airlock-daemon show <command>` to see the active configuration. Run `airlock-daemon eject <command>` to customize.
+Run `airlock-daemon show <command>` to see the active configuration. To customize, add a `commands/<name>.toml` to the agent's directory.
 
 ## Observability
 
-On startup, the daemon prints loaded commands and any user overrides to stderr:
+On startup, the daemon prints loaded commands to stderr:
 
 ```
 airlock: enabled commands: git, terraform
-airlock: user overrides: git
 ```
 
-Run `airlock-daemon check` before restarting to catch TOML syntax errors and missing binaries early.
+Run `airlock-daemon check --agents agents.toml` before restarting to catch TOML syntax errors and missing binaries early.
 
-## Profiles
+## Agents
 
-Profiles scope credentials to individual containers. Each profile is a TOML file in `~/.config/airlock/profiles/`. The daemon creates one unix socket per profile at startup.
+Each agent has its own working directory registered via a TOML file passed with `--agents`. The daemon creates one socket per agent at `~/.config/airlock/sockets/<agent>.sock`.
 
-### Schema
+### Profile Schema (`airlock.toml`)
 
 ```toml
 # Required: allowlist of commands. Use [] to allow all.
@@ -215,29 +248,26 @@ A profile cannot override security hardening set by a command module.
 
 | Path |
 |------|
-| `~/.config/airlock/sockets/<profile>.sock` |
+| `~/.config/airlock/sockets/<agent>.sock` |
 
-### No Profiles = No Start
+### Zero Agents
 
-The daemon requires at least one profile. If `~/.config/airlock/profiles/` is empty or missing, the daemon refuses to start.
+The daemon starts with zero agents and zero sockets if no `--agents` flag is provided.
 
 ## Upgrading
 
+### From v0.3.x
+
+v0.4.0 replaces `~/.config/airlock/profiles/` with the `--agents` registration file. Create agent directories with `airlock.toml`, write a registration file, and pass it via `--agents`. The `diff` and `eject` subcommands have been removed — agent overrides go in the agent's `commands/` directory.
+
 ### From v0.1.x
 
-v0.2.0 requires explicit command enablement. Add `[commands] enable` to `~/.config/airlock/config.toml`:
-
-```toml
-[commands]
-enable = ["git", "terraform"]
-```
-
-Or re-run `airlock init` — it will detect a missing `[commands]` section and print the required config.
+v0.2.0 requires explicit command enablement. Add `[commands] enable` to `~/.config/airlock/config.toml`.
 
 ## Security Model
 
 - The daemon never passes arguments through a shell — always `execve` with an explicit arg array.
 - Unknown commands are rejected. The command directory is an allowlist.
 - The container never holds credentials.
-- User overrides are full replace — no merging with built-ins.
+- Agent overrides are full replace — no merging with built-ins.
 - Built-in modules are compiled into the binary and upgrade with the daemon.

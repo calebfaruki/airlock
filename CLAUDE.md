@@ -4,7 +4,7 @@ This file is the source of truth for the airlock project. Every Claude Code sess
 
 ## What is Airlock?
 
-Airlock is an open-source CLI proxy that isolates Docker container credentials by proxying commands over a unix socket to the host machine. Containers never hold SSH keys, API tokens, or credential files. Instead, a lightweight shim intercepts CLI commands inside the container and delegates execution to a daemon running on the host, where real credentials live.
+Airlock is an open-source CLI proxy that isolates Docker container credentials by proxying commands over a unix socket. Containers never hold SSH keys, API tokens, or credential files. Instead, a lightweight shim intercepts CLI commands inside the container and delegates execution to a daemon where real credentials live. The daemon runs on the host (local) or as a shared container (remote compose/k8s).
 
 Airlock is written in Rust. This choice is deliberate — the daemon sits on a security trust boundary, receives untrusted input from containers, and executes commands with real credentials. Rust's type system encodes validation state at compile time, making it structurally impossible to bypass security checks.
 
@@ -13,7 +13,7 @@ Airlock is written in Rust. This choice is deliberate — the daemon sits on a s
 Three components:
 
 1. **Container-side shim** (`airlock-shim`) — a single static binary inside the container
-2. **Host-side daemon** (`airlock-daemon`) — a long-running process on the host
+2. **Daemon** (`airlock-daemon`) — a long-running process on the host (local) or a shared container (remote compose/k8s)
 3. **Command directory** — TOML-based modules defining how each CLI tool is proxied
 
 ## Design Principles
@@ -71,11 +71,34 @@ Unknown command:
 
 The shim reads lines from the socket. Notifications get printed immediately to the correct stream. The final response (matched by `id`) triggers exit with the returned exit code.
 
-## Profiles
+## Agents
 
-Profiles scope credentials to individual containers. Each profile gets its own unix socket. The volume mount is the capability — no identity verification needed.
+Each agent has its own working directory containing an `airlock.toml` profile and optional `commands/` and `hooks/` subdirectories. The daemon learns about agents by reading a TOML registration file provided via the `--agents` CLI flag.
 
-### Profile TOML (`~/.config/airlock/profiles/<name>.toml`)
+### Agent directory layout
+
+```
+my-agent/
+├── airlock.toml          # required — profile for this agent
+├── commands/             # optional — per-agent command overrides
+│   └── git.toml
+└── hooks/                # optional — per-agent hooks
+    └── pre-exec
+```
+
+### Registration file
+
+```toml
+[my-agent]
+path = "/home/admin/agents/my-agent"
+
+[dev-agent]
+path = "/home/admin/agents/dev-agent"
+```
+
+Each key is the agent name. `path` points to the agent's working directory. The daemon validates that every path exists and contains an `airlock.toml` at startup — it refuses to start if any is missing.
+
+### Profile TOML (`airlock.toml`)
 
 ```toml
 commands = ["git", "gh"]
@@ -92,20 +115,20 @@ set = { GIT_SSH_COMMAND = "ssh -i ~/.ssh/project_a_key" }
 2. **Profile `[env] set`** — injects credentials
 3. **Command module `[env] set`** — injects hardening (wins over profile)
 
-### Socket-per-profile
+### Socket-per-agent
 
-The daemon creates one socket per profile at startup. Mapping: `profiles/<name>.toml` → `sockets/<name>.sock`.
+The daemon creates one socket per registered agent at startup. Mapping: agent name → `sockets/<name>.sock`. If no `--agents` flag is provided, the daemon starts with zero agents and zero sockets.
 
 ## Socket Paths
 
 | Location | Path |
 |----------|------|
 | Inside container (hardcoded) | `/run/docker-airlock.sock` |
-| Host (all platforms) | `~/.config/airlock/sockets/<profile>.sock` |
+| Host (all platforms) | `~/.config/airlock/sockets/<agent>.sock` |
 
-Docker volume mount (example profile `agent-a`):
+Docker volume mount (example agent `my-agent`):
 ```
--v ~/.config/airlock/sockets/agent-a.sock:/run/docker-airlock.sock
+-v ~/.config/airlock/sockets/my-agent.sock:/run/docker-airlock.sock
 ```
 
 ## Container-Side Shim
@@ -129,9 +152,9 @@ The shim does NOT hide airlock's identity. Error messages clearly identify airlo
 
 The shim reads `/proc/self/mountinfo` and parses lines containing `/docker/containers/<64-char-hex>/` to extract its own container ID. This is sent in every request to enable automatic CWD mapping.
 
-## Host-Side Daemon
+## Daemon
 
-Long-running process on the host. Managed by systemd (Linux) or launchd (macOS).
+Long-running process on the host (managed by systemd/launchd) or a shared container (managed by compose/k8s).
 
 ### Responsibilities
 
@@ -162,7 +185,7 @@ No graceful shutdown logic. The process exits on SIGTERM. systemd/launchd handle
 
 ## Command Directory
 
-TOML file per command. Built-in modules are compiled into the binary and versioned with the daemon. Modules are opt-in — only commands listed in `commands.enable` in `config.toml` are loaded at startup. User overrides live in `~/.config/airlock/commands/` and completely replace the built-in (full replace, no merging).
+TOML file per command. Built-in modules are compiled into the binary and versioned with the daemon. Modules are opt-in — only commands listed in `commands.enable` in `config.toml` are loaded at startup. Each agent can optionally have a `commands/` directory with per-agent overrides that completely replace the built-in for that agent (full replace, no merging).
 
 ### TOML Schema
 
@@ -210,19 +233,15 @@ A module must have exactly one of `[allow]` or `[deny]`. Both present is an erro
 
 ### Unknown commands
 
-Rejected. The command directory is an allowlist. If a command has no module (built-in or user override), the daemon returns a JSON-RPC error.
+Rejected. The command directory is an allowlist. If a command has no module (built-in or agent override), the daemon returns a JSON-RPC error.
 
-### User override workflow
+### Inspecting modules
 
-- `airlock show <cmd>` — prints the currently active module (built-in or user override)
-- `airlock diff <cmd>` — compares user override against current built-in
-- `airlock eject <cmd>` — copies the built-in module to `~/.config/airlock/commands/<cmd>.toml` for editing
-
-The daemon logs a warning on startup when a user override exists for a command whose built-in has been updated in a newer version.
+- `airlock show <cmd>` — prints the built-in module for a command
 
 ## Hooks
 
-Executable files in `~/.config/airlock/hooks/`. Can be written in any language.
+Executable files in the agent's `hooks/` directory. Can be written in any language. Each agent has its own hooks — there are no global hooks.
 
 ### pre-exec
 
@@ -289,12 +308,12 @@ Structured for SIEM/Splunk ingestion. Airlock does not own export — it writes 
 
 Single command that sets up the host. Idempotent — safe to run multiple times.
 
-1. Creates directory structure: `~/.config/airlock/`, `~/.config/airlock/hooks/`, `~/.config/airlock/commands/`, `~/.config/airlock/profiles/`, sockets dir, `~/.local/share/airlock/`
-2. Installs systemd user unit (Linux) or launchd plist (macOS)
+1. Creates directory structure: `~/.config/airlock/`, `~/.config/airlock/sockets/`, `~/.local/share/airlock/`
+2. Installs systemd user unit (Linux) or launchd plist (macOS), optionally with `--agents <path>`
 3. Enables and starts the daemon
-4. Prints the Docker volume mount flag for the user to copy
+4. Prints the socket directory path
 
-On version upgrade, `airlock init` updates the service definition but never touches user files (hooks, command overrides, profiles, config).
+On version upgrade, `airlock init` updates the service definition but never touches config.toml.
 
 ## `airlock doctor`
 
@@ -311,13 +330,13 @@ Dry-runs a command through the evaluation pipeline without executing it. Two pha
 
 **Phase 1 (static):** Walks the four decision steps using config and profile files on disk:
 1. **Command enabled?** — is the command in `commands.enable`?
-2. **Module found?** — built-in or user override? (informational, never denies independently)
+2. **Module found?** — built-in or agent override? (informational, never denies independently)
 3. **Policy rules?** — normalized args evaluated against deny or allow rules
 4. **Profile allows?** — is the command in the profile's `commands` list?
 
 **Phase 2 (live):** Connects to the daemon's socket and sends a `check` request. Confirms the daemon's decision matches the static analysis.
 
-Usage: `airlock-daemon test <profile> <command> [args...]`
+Usage: `airlock-daemon test --agents <path> <agent> <command> [args...]`
 
 Exit code 0 if allowed (and live agrees or skipped), 1 if denied or mismatch.
 
@@ -343,36 +362,55 @@ Only commands in `enable` are loaded. Requests for other commands return "unknow
 
 ## Directory Layout
 
+### Daemon directories
+
 ```
 ~/.config/airlock/
 ├── config.toml              # required — commands.enable list
-├── profiles/
-│   ├── default.toml         # required — at least one profile
-│   └── agent-a.toml         # additional profile
-├── sockets/                 # one socket per profile, created by daemon
-│   ├── default.sock         # one socket per profile
-│   └── agent-a.sock
-├── hooks/
-│   ├── pre-exec             # optional, any executable
-│   └── post-exec            # optional, any executable
-└── commands/
-    ├── git.toml             # user override (replaces built-in)
-    └── deploy-cli.toml      # user-defined (no built-in exists)
+└── sockets/                 # one socket per agent, created by daemon
+    ├── my-agent.sock
+    └── dev-agent.sock
 
 ~/.local/share/airlock/
 └── airlock.log              # NDJSON audit log with rotation
 ```
 
+### Agent directory (one per agent, at any path)
+
+```
+/path/to/my-agent/
+├── airlock.toml             # required — profile for this agent
+├── commands/                # optional — per-agent command overrides
+│   └── git.toml
+└── hooks/                   # optional — per-agent hooks
+    ├── pre-exec
+    └── post-exec
+```
+
+### Registration file (passed via `--agents` flag)
+
+```toml
+[my-agent]
+path = "/path/to/my-agent"
+
+[dev-agent]
+path = "/path/to/dev-agent"
+```
+
 ## Distribution
 
-Both binaries published as GitHub release artifacts per platform (linux-amd64, linux-arm64, darwin-amd64, darwin-arm64).
+Both binaries published as GitHub release artifacts per platform (linux-amd64, linux-arm64, darwin-amd64, darwin-arm64). Musl static builds also published for container images.
 
-Host install:
+Host install (local deployment):
 ```
 curl -fsSL https://raw.githubusercontent.com/<user>/airlock/main/install.sh | sh
 ```
 
-Container shim: users download from the GitHub release and add to their Dockerfile however they prefer. Airlock does not prescribe a container image or base layer.
+Container images (remote deployment):
+- `ghcr.io/<user>/airlock-daemon:latest` — daemon image (scratch + static musl binary)
+- `ghcr.io/<user>/airlock-shim:latest` — shim image (scratch + static musl binary)
+
+Start the daemon with agents: `airlock-daemon start --agents /path/to/agents.toml`
 
 ## Security Invariants
 
@@ -382,7 +420,7 @@ These must never be violated:
 2. **Unknown commands are rejected.** The command directory is an allowlist.
 3. **The container never holds credentials.** No SSH keys, no tokens, no credential files mounted in.
 4. **The shim identifies itself in errors.** Agents must be able to distinguish airlock denials from command failures.
-5. **User overrides are full replace.** No merging of TOML modules. The active config is always exactly one source.
+5. **Agent overrides are full replace.** No merging of TOML modules. The active config is always exactly one source.
 6. **Built-in modules are compiled into the binary.** They upgrade with the daemon. No stale files on disk.
 
 ## What Airlock Is NOT
@@ -401,7 +439,7 @@ After any refactor, run `cargo clippy --workspace` and fix all warnings before c
 ## Implementation Phases
 
 1. **Core IPC** — shim + daemon + git hardcoded. Prove the socket works end-to-end with streaming.
-2. **Command directory** — TOML parsing, built-in modules, deny/env/args/exec rules, user overrides.
+2. **Command directory** — TOML parsing, built-in modules, deny/env/args/exec rules, per-agent overrides.
 3. **Hooks** — pre-exec and post-exec executable hooks with stdin/stdout interface.
 4. **`airlock init`** — directory setup, systemd/launchd service installation, idempotent upgrades.
 5. **Logging** — NDJSON audit log with rotation.

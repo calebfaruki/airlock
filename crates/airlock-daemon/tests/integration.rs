@@ -1,8 +1,10 @@
 use airlock_daemon::commands::CommandRegistry;
-use airlock_daemon::hooks::HookRunner;
+use airlock_daemon::hooks::HookResolver;
 use airlock_daemon::logging::AuditLogger;
 use airlock_daemon::profile::Profile;
-use airlock_daemon::{bind_profile_socket, run_daemon, ConcurrencyLocks, MountCache, ProfileMap};
+use airlock_daemon::{
+    bind_profile_socket, run_daemon, ConcurrencyLocks, MountCache, ProfileEntry, ProfileMap,
+};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,9 +35,12 @@ fn default_profiles() -> ProfileMap {
     let mut map = HashMap::new();
     map.insert(
         "default".to_string(),
-        Profile {
-            commands: vec![],
-            env: None,
+        ProfileEntry {
+            profile: Profile {
+                commands: vec![],
+                env: None,
+            },
+            agent_name: None,
         },
     );
     Arc::new(map)
@@ -67,7 +72,7 @@ async fn start_daemon_with_profile(
     registry.load_builtins();
     let registry = Arc::new(registry);
     let locks: ConcurrencyLocks = Arc::new(RwLock::new(HashMap::new()));
-    let hook_runner = Arc::new(HookRunner::new(hooks_dir.to_path_buf()));
+    let hook_resolver = Arc::new(HookResolver::new(hooks_dir.to_path_buf()));
     let logger = Arc::new(AuditLogger::new(log_path.to_path_buf(), 50, 5));
     tokio::spawn(async move {
         run_daemon(
@@ -76,7 +81,7 @@ async fn start_daemon_with_profile(
             cache,
             registry,
             locks,
-            hook_runner,
+            hook_resolver,
             logger,
         )
         .await;
@@ -94,7 +99,7 @@ async fn start_daemon_with_registry(
     let cache: MountCache = Arc::new(RwLock::new(HashMap::new()));
     let registry = Arc::new(registry);
     let locks: ConcurrencyLocks = Arc::new(RwLock::new(HashMap::new()));
-    let hook_runner = Arc::new(HookRunner::new(unique_hooks_dir()));
+    let hook_resolver = Arc::new(HookResolver::new(unique_hooks_dir()));
     let logger = Arc::new(AuditLogger::new(unique_log_path(), 50, 5));
     tokio::spawn(async move {
         run_daemon(
@@ -103,7 +108,7 @@ async fn start_daemon_with_registry(
             cache,
             registry,
             locks,
-            hook_runner,
+            hook_resolver,
             logger,
         )
         .await;
@@ -459,7 +464,10 @@ exit 0
         let mut map = HashMap::new();
         map.insert(
             "restricted".to_string(),
-            Profile::parse(r#"commands = ["git"]"#).unwrap(),
+            ProfileEntry {
+                profile: Profile::parse(r#"commands = ["git"]"#).unwrap(),
+                agent_name: None,
+            },
         );
         let profiles: ProfileMap = Arc::new(map);
         let _handle =

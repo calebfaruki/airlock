@@ -4,11 +4,12 @@ pub mod doctor;
 pub mod hooks;
 pub mod init;
 pub mod logging;
+pub mod paths;
 pub mod profile;
 pub mod test;
 
 use commands::{CommandModule, CommandRegistry};
-use hooks::{HookRunner, PostExecResult, PreExecResult};
+use hooks::{HookResolver, PostExecResult, PreExecResult};
 use logging::{AuditLogger, LogEntry};
 use profile::Profile;
 use serde::{Deserialize, Serialize};
@@ -87,7 +88,13 @@ pub struct DockerMount {
 
 pub type MountCache = Arc<RwLock<HashMap<String, Vec<DockerMount>>>>;
 pub type ConcurrencyLocks = Arc<RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>;
-pub type ProfileMap = Arc<HashMap<String, Profile>>;
+
+pub struct ProfileEntry {
+    pub profile: Profile,
+    pub agent_name: Option<String>,
+}
+
+pub type ProfileMap = Arc<HashMap<String, ProfileEntry>>;
 
 fn is_path_prefix(prefix: &str, path: &str) -> bool {
     if path == prefix {
@@ -311,8 +318,9 @@ pub fn evaluate_request<'a>(
     profile: &Profile,
     profile_name: &str,
     registry: &'a CommandRegistry,
+    agent_name: Option<&str>,
 ) -> EvalDecision<'a> {
-    let module = match registry.get(&params.command) {
+    let module = match registry.get_for_agent(&params.command, agent_name) {
         Some(m) => m,
         None => {
             return EvalDecision::Denied {
@@ -350,7 +358,7 @@ pub async fn handle_connection(
     mount_cache: MountCache,
     registry: Arc<CommandRegistry>,
     cmd_locks: ConcurrencyLocks,
-    hook_runner: Arc<HookRunner>,
+    hook_resolver: Arc<HookResolver>,
     logger: Arc<AuditLogger>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let start = std::time::Instant::now();
@@ -373,13 +381,16 @@ pub async fn handle_connection(
         }
     };
 
-    let profile = profiles
+    let entry = profiles
         .get(&profile_name)
         .expect("profile must exist in map");
+    let profile = &entry.profile;
+    let agent_name = entry.agent_name.as_deref();
+    let hook_runner = hook_resolver.runner_for(agent_name);
 
     // Handle check method: evaluate without execution, hooks, or logging
     if method == "check" {
-        match evaluate_request(&params, profile, &profile_name, &registry) {
+        match evaluate_request(&params, profile, &profile_name, &registry, agent_name) {
             EvalDecision::Allowed(_) => {
                 let resp = serde_json::json!({
                     "jsonrpc": "2.0",
@@ -399,7 +410,8 @@ pub async fn handle_connection(
     }
 
     // Exec path: evaluate, then continue to hooks and execution
-    let mut module = match evaluate_request(&params, profile, &profile_name, &registry) {
+    let mut module = match evaluate_request(&params, profile, &profile_name, &registry, agent_name)
+    {
         EvalDecision::Allowed(m) => m,
         EvalDecision::Denied { code, reason } => {
             deny_request(
@@ -444,8 +456,13 @@ pub async fn handle_connection(
                 }
             };
 
-            let new_module = match evaluate_request(&new_params, profile, &profile_name, &registry)
-            {
+            let new_module = match evaluate_request(
+                &new_params,
+                profile,
+                &profile_name,
+                &registry,
+                agent_name,
+            ) {
                 EvalDecision::Allowed(m) => m,
                 EvalDecision::Denied { code, reason } => {
                     deny_request(
@@ -706,7 +723,7 @@ pub async fn run_daemon(
     mount_cache: MountCache,
     registry: Arc<CommandRegistry>,
     cmd_locks: ConcurrencyLocks,
-    hook_runner: Arc<HookRunner>,
+    hook_resolver: Arc<HookResolver>,
     logger: Arc<AuditLogger>,
 ) {
     for (profile_name, listener) in listeners {
@@ -715,7 +732,7 @@ pub async fn run_daemon(
         let cache = mount_cache.clone();
         let reg = registry.clone();
         let locks = cmd_locks.clone();
-        let hooks = hook_runner.clone();
+        let hooks = hook_resolver.clone();
         let log = logger.clone();
         tokio::spawn(async move {
             loop {

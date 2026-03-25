@@ -3,8 +3,8 @@ use airlock_daemon::config::{self, Config};
 use airlock_daemon::doctor;
 use airlock_daemon::hooks::HookResolver;
 use airlock_daemon::logging::AuditLogger;
-use airlock_daemon::paths::DaemonPaths;
-use airlock_daemon::profile::Profile;
+use airlock_daemon::paths::{AgentPaths, DaemonPaths};
+use airlock_daemon::registration;
 use airlock_daemon::test;
 use airlock_daemon::{
     bind_profile_socket, run_daemon, ConcurrencyLocks, MountCache, ProfileEntry, ProfileMap,
@@ -16,10 +16,9 @@ use std::sync::Arc;
 use tokio::net::UnixListener;
 use tokio::sync::RwLock;
 
-fn load_registry(paths: &DaemonPaths) -> CommandRegistry {
+fn load_registry() -> CommandRegistry {
     let mut registry = CommandRegistry::new();
     registry.load_builtins();
-    registry.load_user_overrides(&paths.user_commands_dir(), None);
     registry
 }
 
@@ -41,14 +40,34 @@ fn require_enabled_commands(paths: &DaemonPaths) -> (Config, HashSet<String>) {
     (app_config, enabled)
 }
 
-fn load_filtered_registry(paths: &DaemonPaths, enabled: &HashSet<String>) -> CommandRegistry {
+fn load_filtered_registry(enabled: &HashSet<String>) -> CommandRegistry {
     let mut registry = CommandRegistry::new();
     registry.load_builtins_filtered(enabled);
-    registry.load_user_overrides(&paths.user_commands_dir(), Some(enabled));
     registry
 }
 
-fn show_command(paths: &DaemonPaths, args: &[String]) {
+fn load_agents_or_exit(path: &std::path::Path) -> Vec<registration::AgentRegistration> {
+    registration::load_registration(path).unwrap_or_else(|e| {
+        eprintln!("airlock: {e}");
+        std::process::exit(1);
+    })
+}
+
+fn load_agent_overrides_from_registrations(
+    registrations: &[registration::AgentRegistration],
+    registry: &mut CommandRegistry,
+    enabled: &HashSet<String>,
+) {
+    for reg in registrations {
+        let agent = AgentPaths::new(reg.path.clone());
+        let cmds_dir = agent.commands_dir();
+        if cmds_dir.is_dir() {
+            registry.load_agent_overrides(&reg.name, &cmds_dir, Some(enabled));
+        }
+    }
+}
+
+fn show_command(args: &[String]) {
     let cmd = match args.first() {
         Some(c) => c,
         None => {
@@ -57,7 +76,7 @@ fn show_command(paths: &DaemonPaths, args: &[String]) {
         }
     };
 
-    let registry = load_registry(paths);
+    let registry = load_registry();
     match registry.active_toml(cmd) {
         Some(toml) => print!("{toml}"),
         None => {
@@ -67,105 +86,32 @@ fn show_command(paths: &DaemonPaths, args: &[String]) {
     }
 }
 
-fn diff_command(paths: &DaemonPaths, args: &[String]) {
-    let cmd = match args.first() {
-        Some(c) => c,
-        None => {
-            eprintln!("usage: airlock-daemon diff <command>");
-            std::process::exit(1);
-        }
-    };
-
-    let registry = load_registry(paths);
-
-    if !registry.has_user_override(cmd) {
-        if registry.has_builtin(cmd) {
-            println!("No user override for '{cmd}'. Built-in is active.");
-        } else {
-            eprintln!("unknown command: {cmd}");
-            std::process::exit(1);
-        }
-        return;
-    }
-
-    if !registry.has_builtin(cmd) {
-        println!("'{cmd}' is user-defined. No built-in to compare.");
-        return;
-    }
-
-    let builtin = registry.builtin_toml(cmd).unwrap();
-    let user = registry.user_toml(cmd).unwrap();
-
-    let tmp_dir = std::env::temp_dir();
-    let builtin_path = tmp_dir.join(format!("airlock-builtin-{cmd}.toml"));
-    let user_path = tmp_dir.join(format!("airlock-user-{cmd}.toml"));
-
-    std::fs::write(&builtin_path, builtin).expect("failed to write temp file");
-    std::fs::write(&user_path, user).expect("failed to write temp file");
-
-    let output = std::process::Command::new("diff")
-        .arg("-u")
-        .arg("--label")
-        .arg(format!("built-in/{cmd}.toml"))
-        .arg("--label")
-        .arg(format!("user/{cmd}.toml"))
-        .arg(&builtin_path)
-        .arg(&user_path)
-        .output()
-        .expect("failed to run diff");
-
-    let _ = std::fs::remove_file(&builtin_path);
-    let _ = std::fs::remove_file(&user_path);
-
-    print!("{}", String::from_utf8_lossy(&output.stdout));
-    if !output.stderr.is_empty() {
-        eprint!("{}", String::from_utf8_lossy(&output.stderr));
-    }
-}
-
-fn eject_command(paths: &DaemonPaths, args: &[String]) {
-    let cmd = match args.first() {
-        Some(c) => c,
-        None => {
-            eprintln!("usage: airlock-daemon eject <command>");
-            std::process::exit(1);
-        }
-    };
-
-    let mut registry = CommandRegistry::new();
-    registry.load_builtins();
-
-    let builtin = match registry.builtin_toml(cmd) {
-        Some(t) => t.to_string(),
-        None => {
-            eprintln!("no built-in module for '{cmd}'");
-            std::process::exit(1);
-        }
-    };
-
-    let dir = paths.user_commands_dir();
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!("failed to create {}: {e}", dir.display());
-        std::process::exit(1);
-    }
-
-    let path = dir.join(format!("{cmd}.toml"));
-    if path.exists() {
-        eprintln!(
-            "user override already exists at {}. Delete it first to re-eject.",
-            path.display()
-        );
-        std::process::exit(1);
-    }
-
-    std::fs::write(&path, builtin).expect("failed to write file");
-    println!("ejected built-in '{cmd}' to {}", path.display());
-}
-
 #[tokio::main]
 async fn main() {
-    let args: Vec<String> = env::args().collect();
+    let raw_args: Vec<String> = env::args().collect();
     let paths = DaemonPaths::detect();
+
+    let agents_path: Option<PathBuf> = raw_args
+        .windows(2)
+        .find(|w| w[0] == "--agents")
+        .map(|w| PathBuf::from(&w[1]));
+
+    let args: Vec<String> = {
+        let mut filtered = Vec::new();
+        let mut skip_next = false;
+        for arg in &raw_args {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if arg == "--agents" {
+                skip_next = true;
+                continue;
+            }
+            filtered.push(arg.clone());
+        }
+        filtered
+    };
 
     let subcommand = args.get(1).map(|s| s.as_str()).unwrap_or("help");
 
@@ -176,15 +122,7 @@ async fn main() {
             return;
         }
         "show" => {
-            show_command(&paths, &args[2..]);
-            return;
-        }
-        "diff" => {
-            diff_command(&paths, &args[2..]);
-            return;
-        }
-        "eject" => {
-            eject_command(&paths, &args[2..]);
+            show_command(&args[2..]);
             return;
         }
         "init" => {
@@ -204,41 +142,58 @@ async fn main() {
             return;
         }
         "check" => {
-            let mut registry = CommandRegistry::new();
-            registry.load_builtins();
+            let registry = load_registry();
+            let commands = registry.command_names();
+            eprintln!("airlock: {} built-in commands", commands.len());
 
-            let user_dir = paths.user_commands_dir();
             let mut has_errors = false;
 
-            if user_dir.exists() {
-                if let Ok(entries) = std::fs::read_dir(&user_dir) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-                            continue;
+            if let Some(ref agents_file) = agents_path {
+                let registrations = match registration::load_registration(agents_file) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("airlock: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                for reg in &registrations {
+                    let agent = AgentPaths::new(reg.path.clone());
+                    match agent.load_profile() {
+                        Ok(_) => eprintln!("  agent {}: profile ok", reg.name),
+                        Err(e) => {
+                            eprintln!("  agent {}: profile error — {e}", reg.name);
+                            has_errors = true;
                         }
-                        let name = path.file_stem().unwrap().to_string_lossy();
-                        let content = match std::fs::read_to_string(&path) {
-                            Ok(c) => c,
-                            Err(e) => {
-                                eprintln!("  error: {name} — {e}");
-                                has_errors = true;
-                                continue;
-                            }
-                        };
-                        match airlock_daemon::commands::CommandModule::parse(&content) {
-                            Ok(_) => eprintln!("  ok: {name}"),
-                            Err(e) => {
-                                eprintln!("  error: {name} — {e}");
-                                has_errors = true;
+                    }
+                    let cmds_dir = agent.commands_dir();
+                    if cmds_dir.is_dir() {
+                        if let Ok(entries) = std::fs::read_dir(&cmds_dir) {
+                            for entry in entries.flatten() {
+                                let path = entry.path();
+                                if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                                    continue;
+                                }
+                                let name = path.file_stem().unwrap().to_string_lossy();
+                                let content = match std::fs::read_to_string(&path) {
+                                    Ok(c) => c,
+                                    Err(e) => {
+                                        eprintln!("  agent {}: error: {name} — {e}", reg.name);
+                                        has_errors = true;
+                                        continue;
+                                    }
+                                };
+                                match airlock_daemon::commands::CommandModule::parse(&content) {
+                                    Ok(_) => eprintln!("  agent {}: ok: {name}", reg.name),
+                                    Err(e) => {
+                                        eprintln!("  agent {}: error: {name} — {e}", reg.name);
+                                        has_errors = true;
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
-
-            let commands = registry.command_names();
-            eprintln!("airlock: {} built-in commands", commands.len());
 
             if has_errors {
                 eprintln!("airlock: validation failed");
@@ -250,7 +205,17 @@ async fn main() {
         }
         "doctor" => {
             let (_, enabled) = require_enabled_commands(&paths);
-            let registry = load_filtered_registry(&paths, &enabled);
+            let mut registry = load_filtered_registry(&enabled);
+
+            if let Some(ref agents_file) = agents_path {
+                if let Ok(registrations) = registration::load_registration(agents_file) {
+                    load_agent_overrides_from_registrations(
+                        &registrations,
+                        &mut registry,
+                        &enabled,
+                    );
+                }
+            }
 
             let cmd_results = doctor::check_commands(&registry);
             doctor::print_results("Commands", &cmd_results);
@@ -264,60 +229,74 @@ async fn main() {
             return;
         }
         "test" => {
-            let profile_name = match args.get(2) {
+            let agent_name = match args.get(2) {
                 Some(p) => p,
                 None => {
-                    eprintln!("usage: airlock-daemon test <profile> <command> [args...]");
+                    eprintln!(
+                        "usage: airlock-daemon test --agents <path> <agent> <command> [args...]"
+                    );
                     std::process::exit(1);
                 }
             };
             let command = match args.get(3) {
                 Some(c) => c,
                 None => {
-                    eprintln!("usage: airlock-daemon test <profile> <command> [args...]");
+                    eprintln!(
+                        "usage: airlock-daemon test --agents <path> <agent> <command> [args...]"
+                    );
                     std::process::exit(1);
                 }
             };
             let cmd_args: Vec<String> = args[4..].to_vec();
 
-            let (_, enabled) = require_enabled_commands(&paths);
-            let registry = load_filtered_registry(&paths, &enabled);
-
-            let profile_path = paths.profiles_dir().join(format!("{profile_name}.toml"));
-            let profile_content = match std::fs::read_to_string(&profile_path) {
-                Ok(c) => c,
-                Err(_) => {
+            let agents_file = match &agents_path {
+                Some(p) => p,
+                None => {
+                    eprintln!("airlock: --agents flag required for test subcommand");
+                    std::process::exit(1);
+                }
+            };
+            let registrations = load_agents_or_exit(agents_file);
+            let reg = match registrations.iter().find(|r| r.name == *agent_name) {
+                Some(r) => r,
+                None => {
                     eprintln!(
-                        "airlock: profile '{profile_name}' not found at {}",
-                        profile_path.display()
+                        "airlock: agent '{agent_name}' not found in {}",
+                        agents_file.display()
                     );
                     std::process::exit(1);
                 }
             };
-            let profile = match Profile::parse(&profile_content) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("airlock: failed to parse profile '{profile_name}': {e}");
-                    std::process::exit(1);
-                }
-            };
+            let agent = AgentPaths::new(reg.path.clone());
+            let profile = agent.load_profile().unwrap_or_else(|e| {
+                eprintln!("airlock: {e}");
+                std::process::exit(1);
+            });
+
+            let (_, enabled) = require_enabled_commands(&paths);
+            let mut registry = load_filtered_registry(&enabled);
+            load_agent_overrides_from_registrations(
+                std::slice::from_ref(reg),
+                &mut registry,
+                &enabled,
+            );
 
             let result = test::evaluate(
-                profile_name,
+                agent_name,
                 &profile,
                 command,
                 &cmd_args,
                 &enabled,
                 &registry,
-                &paths.hooks_dir(),
-                None,
+                &agent.hooks_dir(),
+                Some(agent_name),
             );
             test::print_result(&result);
 
             let static_allowed = result.outcome == "ALLOWED";
             eprintln!();
             let live = test::check_live(
-                profile_name,
+                agent_name,
                 command,
                 &cmd_args,
                 &paths.sockets_dir,
@@ -336,31 +315,20 @@ async fn main() {
             let sub = args.get(2).map(|s| s.as_str()).unwrap_or("help");
             match sub {
                 "list" => {
-                    let prof_dir = paths.profiles_dir();
-                    let sock_dir = &paths.sockets_dir;
-                    if !prof_dir.exists() {
-                        eprintln!("no profiles directory at {}", prof_dir.display());
-                        std::process::exit(1);
-                    }
-                    let mut names: Vec<String> = Vec::new();
-                    if let Ok(entries) = std::fs::read_dir(&prof_dir) {
-                        for entry in entries.flatten() {
-                            let path = entry.path();
-                            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-                                continue;
-                            }
-                            if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
-                                names.push(name.to_string());
-                            }
+                    let registrations = match &agents_path {
+                        Some(p) => load_agents_or_exit(p),
+                        None => {
+                            eprintln!("no agents registered (use --agents flag)");
+                            std::process::exit(0);
                         }
+                    };
+                    let sock_dir = &paths.sockets_dir;
+                    for reg in &registrations {
+                        let sock = sock_dir.join(format!("{}.sock", reg.name));
+                        println!("{}\t{}", reg.name, sock.display());
                     }
-                    names.sort();
-                    for name in &names {
-                        let sock = sock_dir.join(format!("{name}.sock"));
-                        println!("{name}\t{}", sock.display());
-                    }
-                    if names.is_empty() {
-                        eprintln!("no profiles found in {}", prof_dir.display());
+                    if registrations.is_empty() {
+                        eprintln!("no agents in registration file");
                     }
                 }
                 "show" => {
@@ -371,11 +339,25 @@ async fn main() {
                             std::process::exit(1);
                         }
                     };
-                    let path = paths.profiles_dir().join(format!("{name}.toml"));
-                    match std::fs::read_to_string(&path) {
+                    let registrations = match &agents_path {
+                        Some(p) => load_agents_or_exit(p),
+                        None => {
+                            eprintln!("airlock: --agents flag required");
+                            std::process::exit(1);
+                        }
+                    };
+                    let reg = match registrations.iter().find(|r| r.name == *name) {
+                        Some(r) => r,
+                        None => {
+                            eprintln!("airlock: agent '{name}' not found in registration file");
+                            std::process::exit(1);
+                        }
+                    };
+                    let agent = AgentPaths::new(reg.path.clone());
+                    match std::fs::read_to_string(agent.profile_path()) {
                         Ok(content) => print!("{content}"),
                         Err(e) => {
-                            eprintln!("failed to read profile '{name}': {e}");
+                            eprintln!("failed to read profile for agent '{name}': {e}");
                             std::process::exit(1);
                         }
                     }
@@ -388,56 +370,35 @@ async fn main() {
             return;
         }
         _ => {
-            eprintln!(
-                "usage: airlock-daemon <start|version|init|check|doctor|why|show|diff|eject|profile>"
-            );
+            eprintln!("usage: airlock-daemon <start|version|init|check|doctor|test|show|profile>");
             std::process::exit(1);
         }
     }
 
-    // Load profiles
-    let prof_dir = paths.profiles_dir();
-    let mut profile_map: HashMap<String, ProfileEntry> = HashMap::new();
+    // Load agents from registration file
+    let registrations = match &agents_path {
+        Some(p) => load_agents_or_exit(p),
+        None => Vec::new(),
+    };
 
-    if prof_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&prof_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-                    continue;
-                }
-                let name = match path.file_stem().and_then(|s| s.to_str()) {
-                    Some(n) => n.to_string(),
-                    None => continue,
-                };
-                let content = match std::fs::read_to_string(&path) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        eprintln!("airlock: failed to read profile '{}': {e}", path.display());
-                        std::process::exit(1);
-                    }
-                };
-                match Profile::parse(&content) {
-                    Ok(profile) => {
-                        profile_map.insert(
-                            name,
-                            ProfileEntry {
-                                profile,
-                                agent_name: None,
-                            },
-                        );
-                    }
-                    Err(e) => {
-                        eprintln!("airlock: failed to parse profile '{}': {e}", path.display());
-                        std::process::exit(1);
-                    }
-                }
-            }
-        }
+    let mut profile_map: HashMap<String, ProfileEntry> = HashMap::new();
+    for reg in &registrations {
+        let agent = AgentPaths::new(reg.path.clone());
+        let profile = agent.load_profile().unwrap_or_else(|e| {
+            eprintln!("airlock: agent '{}': {e}", reg.name);
+            std::process::exit(1);
+        });
+        profile_map.insert(
+            reg.name.clone(),
+            ProfileEntry {
+                profile,
+                agent_name: Some(reg.name.clone()),
+            },
+        );
     }
 
     if profile_map.is_empty() {
-        eprintln!("airlock: no profiles found — daemon started with no active sockets");
+        eprintln!("airlock: no agents registered — daemon started with no active sockets");
     }
 
     // Bind sockets
@@ -491,18 +452,22 @@ async fn main() {
     ));
 
     let mount_cache: MountCache = Arc::new(RwLock::new(HashMap::new()));
-    let registry = load_filtered_registry(&paths, &enabled_commands);
+    let mut registry = load_filtered_registry(&enabled_commands);
+    let mut hook_resolver = HookResolver::new();
+
+    load_agent_overrides_from_registrations(&registrations, &mut registry, &enabled_commands);
+    for reg in &registrations {
+        let agent = AgentPaths::new(reg.path.clone());
+        hook_resolver.add_agent(reg.name.clone(), agent.hooks_dir());
+    }
+
     eprintln!(
         "airlock: enabled commands: {}",
         registry.command_names().join(", ")
     );
-    let overrides = registry.user_override_names();
-    if !overrides.is_empty() {
-        eprintln!("airlock: user overrides: {}", overrides.join(", "));
-    }
     let registry = Arc::new(registry);
     let cmd_locks: ConcurrencyLocks = Arc::new(RwLock::new(HashMap::new()));
-    let hook_resolver = Arc::new(HookResolver::new(paths.hooks_dir()));
+    let hook_resolver = Arc::new(hook_resolver);
 
     run_daemon(
         listeners,

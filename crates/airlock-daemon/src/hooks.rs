@@ -191,15 +191,19 @@ fn extract_error_message(stdout: &str) -> Option<String> {
 }
 
 pub struct HookResolver {
-    default_runner: HookRunner,
     noop_runner: HookRunner,
     agent_runners: HashMap<String, HookRunner>,
 }
 
+impl Default for HookResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HookResolver {
-    pub fn new(default_hooks_dir: PathBuf) -> Self {
+    pub fn new() -> Self {
         Self {
-            default_runner: HookRunner::new(default_hooks_dir),
             noop_runner: HookRunner::noop(),
             agent_runners: HashMap::new(),
         }
@@ -214,12 +218,8 @@ impl HookResolver {
 
     pub fn runner_for(&self, agent_name: Option<&str>) -> &HookRunner {
         match agent_name {
-            Some(name) => {
-                // TODO: when registration lands, an unregistered agent name here
-                // becomes a silent misconfiguration. Add tracing::warn! then.
-                self.agent_runners.get(name).unwrap_or(&self.noop_runner)
-            }
-            None => &self.default_runner,
+            Some(name) => self.agent_runners.get(name).unwrap_or(&self.noop_runner),
+            None => &self.noop_runner,
         }
     }
 }
@@ -227,18 +227,17 @@ impl HookResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
-    fn none_agent_returns_default_runner() {
-        let r = HookResolver::new(PathBuf::from("/some/hooks"));
+    fn none_agent_returns_noop() {
+        let r = HookResolver::new();
         let runner = r.runner_for(None);
-        assert_eq!(runner.hooks_dir.as_deref(), Some(Path::new("/some/hooks")));
+        assert!(runner.hooks_dir.is_none());
     }
 
     #[test]
     fn unknown_agent_returns_noop() {
-        let r = HookResolver::new(PathBuf::from("/some/hooks"));
+        let r = HookResolver::new();
         let runner = r.runner_for(Some("unknown-agent"));
         assert!(runner.hooks_dir.is_none());
     }
@@ -248,7 +247,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("airlock-rg-hook-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
 
-        let mut r = HookResolver::new(PathBuf::from("/some/hooks"));
+        let mut r = HookResolver::new();
         r.add_agent("agent-a".to_string(), dir.clone());
 
         let runner = r.runner_for(Some("agent-a"));
@@ -259,7 +258,7 @@ mod tests {
 
     #[test]
     fn nonexistent_hooks_dir_yields_noop() {
-        let mut r = HookResolver::new(PathBuf::from("/some/hooks"));
+        let mut r = HookResolver::new();
         r.add_agent("agent-b".to_string(), PathBuf::from("/nonexistent/hooks"));
 
         let runner = r.runner_for(Some("agent-b"));

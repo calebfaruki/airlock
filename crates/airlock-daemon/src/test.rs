@@ -77,11 +77,7 @@ pub fn evaluate(
 
     // Step 2: module found (informational — always succeeds if step 1 passed)
     let module = registry.get_for_agent(command, agent_name).unwrap();
-    let source = if registry.has_user_override(command) {
-        "user override"
-    } else {
-        "built-in"
-    };
+    let source = "built-in";
     steps.push((
         "module found",
         StepResult::Ok(format!("{command} ({source})")),

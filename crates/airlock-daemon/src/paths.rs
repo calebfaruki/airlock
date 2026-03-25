@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 pub struct DaemonPaths {
     pub config_dir: PathBuf,
     pub sockets_dir: PathBuf,
-    pub data_dir: PathBuf,
 }
 
 impl DaemonPaths {
@@ -13,25 +12,12 @@ impl DaemonPaths {
         Self {
             sockets_dir: config_dir.join("sockets"),
             config_dir,
-            data_dir: home.join(".local").join("share").join("airlock"),
         }
     }
 
     pub fn detect() -> Self {
         let home = std::env::var("HOME").expect("HOME not set");
         Self::from_home(Path::new(&home))
-    }
-
-    pub fn profiles_dir(&self) -> PathBuf {
-        self.config_dir.join("profiles")
-    }
-
-    pub fn user_commands_dir(&self) -> PathBuf {
-        self.config_dir.join("commands")
-    }
-
-    pub fn hooks_dir(&self) -> PathBuf {
-        self.config_dir.join("hooks")
     }
 }
 
@@ -42,14 +28,6 @@ pub struct AgentPaths {
 impl AgentPaths {
     pub fn new(root: PathBuf) -> Self {
         Self { root }
-    }
-
-    pub fn agent_name(&self) -> String {
-        self.root
-            .file_name()
-            .expect("agent root must have a directory name")
-            .to_string_lossy()
-            .to_string()
     }
 
     pub fn profile_path(&self) -> PathBuf {
@@ -86,33 +64,6 @@ mod tests {
             p.sockets_dir,
             PathBuf::from("/home/testuser/.config/airlock/sockets")
         );
-        assert_eq!(
-            p.data_dir,
-            PathBuf::from("/home/testuser/.local/share/airlock")
-        );
-    }
-
-    #[test]
-    fn legacy_convenience_methods() {
-        let p = DaemonPaths::from_home(Path::new("/home/testuser"));
-        assert_eq!(
-            p.profiles_dir(),
-            PathBuf::from("/home/testuser/.config/airlock/profiles")
-        );
-        assert_eq!(
-            p.user_commands_dir(),
-            PathBuf::from("/home/testuser/.config/airlock/commands")
-        );
-        assert_eq!(
-            p.hooks_dir(),
-            PathBuf::from("/home/testuser/.config/airlock/hooks")
-        );
-    }
-
-    #[test]
-    fn agent_name_is_directory_name() {
-        let a = AgentPaths::new(PathBuf::from("/home/admin/my-agents/hello-world"));
-        assert_eq!(a.agent_name(), "hello-world");
     }
 
     #[test]

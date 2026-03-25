@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Airlock — Credential isolation for containerized agents</title>
+  <title>Airlock — Credential isolation for agent containers</title>
   <meta name="description" content="Credential isolation for CLI tools in Docker containers. Proxy git, aws, terraform, and other commands without mounting secrets into the container.">
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
@@ -36,7 +36,7 @@
 ░█ ░█ ▄█▄ ░█ ░█ ░█▄▄▄ ░█▄▄▄█ ░█▄▄▄ ░█ ░█</pre>
 
       <p class="text-lg sm:text-xl font-medium text-gray-300 mb-3">
-        Credential isolation for AI coding agents.
+        Credential isolation for agent containers.
       </p>
       <p class="text-sm text-gray-500 mb-8 leading-relaxed">
         Give agents access to CLI commands without exposing credentials. Commands proxy from a container-side shim to an airlock daemon over a unix socket. The container never holds a secret.

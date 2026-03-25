@@ -39,7 +39,7 @@
         Credential isolation for AI coding agents.
       </p>
       <p class="text-sm text-gray-500 mb-8 leading-relaxed">
-        Give agents access to CLI commands without exposing credentials. Commands proxy from a container-side shim to a host-side daemon. The container never holds a secret.
+        Give agents access to CLI commands without exposing credentials. Commands proxy from a container-side shim to an airlock daemon over a unix socket. The container never holds a secret.
       </p>
 
       <div class="relative group mb-4">
@@ -75,7 +75,7 @@ docker run -e GITHUB_TOKEN=$GITHUB_TOKEN agent-image</pre>
       <h2 class="border-b border-white/20 text-lg font-medium mb-6">The solution</h2>
 
       <p class="text-sm text-gray-300 mb-8">
-        Containers never hold secrets. A host-side daemon proxies CLI tools over a unix socket.
+        Containers never hold secrets. A daemon proxies CLI tools over a unix socket.
       </p>
 
       <div class="grid sm:grid-cols-2 gap-0 mb-8 text-sm">
@@ -151,8 +151,8 @@ docker run -e GITHUB_TOKEN=$GITHUB_TOKEN agent-image</pre>
           <p class="text-sm text-gray-500">Only enabled commands load. Others don't exist.</p>
         </div>
         <div class="border border-white/10 px-4 py-3 ml-4">
-          <div class="text-sm font-medium text-gray-300 mb-1">Layer 2: Profiles</div>
-          <p class="text-sm text-gray-500">Each container scoped to specific commands and credentials.</p>
+          <div class="text-sm font-medium text-gray-300 mb-1">Layer 2: Agents</div>
+          <p class="text-sm text-gray-500">Each agent scoped to specific commands and credentials.</p>
         </div>
         <div class="border border-white/10 px-4 py-3 ml-8">
           <div class="text-sm font-medium text-gray-300 mb-1">Layer 3: Deny rules</div>

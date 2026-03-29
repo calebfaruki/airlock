@@ -61,24 +61,13 @@ fn default_true() -> bool {
     true
 }
 
-fn parameters_schema(_: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-    schemars::schema::SchemaObject {
-        instance_type: Some(schemars::schema::InstanceType::Object.into()),
-        extensions: [(
-            "x-kubernetes-preserve-unknown-fields".to_string(),
-            serde_json::json!(true),
-        )]
-        .into_iter()
-        .collect(),
-        metadata: Some(Box::new(schemars::schema::Metadata {
-            description: Some(
-                "JSON Schema describing tool parameters (passed through to ListTools).".to_string(),
-            ),
-            ..Default::default()
-        })),
-        ..Default::default()
-    }
-    .into()
+fn parameters_schema(_: &mut schemars::generate::SchemaGenerator) -> schemars::Schema {
+    serde_json::from_value(serde_json::json!({
+        "type": "object",
+        "description": "JSON Schema describing tool parameters (passed through to ListTools).",
+        "x-kubernetes-preserve-unknown-fields": true
+    }))
+    .unwrap()
 }
 
 #[cfg(test)]

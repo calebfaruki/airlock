@@ -12,6 +12,7 @@ pub async fn watch_tools(
     client: Client,
     namespace: &str,
     state: Arc<ControllerState>,
+    ready_tx: tokio::sync::watch::Sender<bool>,
 ) -> anyhow::Result<()> {
     let api: Api<AirlockTool> = Api::namespaced(client, namespace);
     let watcher_config = watcher::Config::default();
@@ -40,6 +41,7 @@ pub async fn watch_tools(
             Event::InitDone => {
                 let count = state.tool_count().await;
                 info!(count, "tool watcher initial sync complete");
+                let _ = ready_tx.send(true);
             }
         }
     }

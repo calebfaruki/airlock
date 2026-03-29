@@ -7,34 +7,40 @@ permissions:
   contents: read
 
 jobs:
-  build-daemon:
+  build-controller:
     strategy:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: airlock-daemon-linux-amd64
+            artifact: airlock-controller-linux-amd64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: airlock-daemon-linux-arm64
+            artifact: airlock-controller-linux-arm64
           - target: x86_64-apple-darwin
             os: macos-latest
-            artifact: airlock-daemon-darwin-amd64
+            artifact: airlock-controller-darwin-amd64
           - target: aarch64-apple-darwin
             os: macos-latest
-            artifact: airlock-daemon-darwin-arm64
+            artifact: airlock-controller-darwin-arm64
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            artifact: airlock-daemon-linux-musl-amd64
+            artifact: airlock-controller-linux-musl-amd64
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
-            artifact: airlock-daemon-linux-musl-arm64
+            artifact: airlock-controller-linux-musl-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@d1565eeb874f106d1696ad08faf835331133fe14 # stable
         with:
           targets: ${{ matrix.target }}
+      - name: Install protobuf compiler
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protobuf compiler (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
       - name: Install musl tools
         if: contains(matrix.target, 'musl')
         run: |
@@ -55,31 +61,34 @@ jobs:
       - name: Build
         run: |
           if [[ "${{ matrix.target }}" == *musl* ]]; then
-            RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target ${{ matrix.target }} -p airlock-daemon
+            RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target ${{ matrix.target }} -p airlock-controller
           else
-            cargo build --release --target ${{ matrix.target }} -p airlock-daemon
+            cargo build --release --target ${{ matrix.target }} -p airlock-controller
           fi
       - name: Rename artifact
-        run: cp target/${{ matrix.target }}/release/airlock-daemon ${{ matrix.artifact }}
+        run: cp target/${{ matrix.target }}/release/airlock-controller ${{ matrix.artifact }}
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
 
-  build-shim:
+  build-agent:
     strategy:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
-            artifact: airlock-shim-linux-amd64
+            artifact: airlock-agent-linux-amd64
           - target: aarch64-unknown-linux-musl
-            artifact: airlock-shim-linux-arm64
+            artifact: airlock-agent-linux-arm64
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@d1565eeb874f106d1696ad08faf835331133fe14 # stable
         with:
           targets: ${{ matrix.target }}
+      - uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install musl tools
         run: |
           sudo apt-get update
@@ -92,16 +101,16 @@ jobs:
           echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
       - name: Build static binary
         run: |
-          RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target ${{ matrix.target }} -p airlock-shim
+          RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target ${{ matrix.target }} -p airlock-agent
       - name: Rename artifact
-        run: cp target/${{ matrix.target }}/release/airlock-shim ${{ matrix.artifact }}
+        run: cp target/${{ matrix.target }}/release/airlock-agent ${{ matrix.artifact }}
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
 
   release:
-    needs: [build-daemon, build-shim]
+    needs: [build-controller, build-agent]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -124,18 +133,23 @@ jobs:
       - uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
         with:
           subject-path: |
-            artifacts/airlock-daemon-*
-            artifacts/airlock-shim-*
+            artifacts/airlock-controller-*
+            artifacts/airlock-agent-*
       - name: Extract changelog
-        run: awk '/^## /{if(n++)exit}n' CHANGELOG.md > notes.md
+        run: |
+          if [ -f CHANGELOG.md ]; then
+            awk '/^## /{if(n++)exit}n' CHANGELOG.md > notes.md
+          else
+            echo "Release ${{ github.ref_name }}" > notes.md
+          fi
       - name: Create release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
         with:
           files: artifacts/*
           body_path: notes.md
 
-  publish-shim-image:
-    needs: [build-shim]
+  publish-controller-image:
+    needs: [build-controller]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -157,15 +171,15 @@ jobs:
       - uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
           context: artifacts
-          file: Dockerfile.shim
+          file: Dockerfile.controller
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/${{ github.repository_owner }}/airlock-shim:${{ github.ref_name }}
-            ghcr.io/${{ github.repository_owner }}/airlock-shim:latest
+            ghcr.io/${{ github.repository_owner }}/airlock-controller:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/airlock-controller:latest
 
-  publish-daemon-image:
-    needs: [build-daemon]
+  publish-agent-image:
+    needs: [build-agent]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -187,9 +201,42 @@ jobs:
       - uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
           context: artifacts
-          file: Dockerfile.daemon
+          file: Dockerfile.agent
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/${{ github.repository_owner }}/airlock-daemon:${{ github.ref_name }}
-            ghcr.io/${{ github.repository_owner }}/airlock-daemon:latest
+            ghcr.io/${{ github.repository_owner }}/airlock-agent:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/airlock-agent:latest
+
+  publish-tool-images:
+    needs: [build-agent]
+    strategy:
+      matrix:
+        tool: [git]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+      - uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: images/${{ matrix.tool }}
+          merge-multiple: true
+      - uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        with:
+          context: images/${{ matrix.tool }}
+          file: images/${{ matrix.tool }}/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/airlock-${{ matrix.tool }}:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/airlock-${{ matrix.tool }}:latest

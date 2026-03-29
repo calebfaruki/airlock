@@ -1,0 +1,85 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: airlocktools.airlock.dev
+spec:
+  group: airlock.dev
+  names:
+    categories: []
+    kind: AirlockTool
+    plural: airlocktools
+    shortNames: []
+    singular: airlocktool
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.image
+      name: Image
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for AirlockToolSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              command:
+                description: Command template with `{param_name}` placeholders.
+                type: string
+              credential:
+                description: Optional credential Secret to mount into the Job.
+                nullable: true
+                properties:
+                  mountPath:
+                    type: string
+                  secretName:
+                    type: string
+                required:
+                - mountPath
+                - secretName
+                type: object
+              description:
+                type: string
+              image:
+                description: Container image that includes the airlock-agent binary.
+                type: string
+              keepalive:
+                default: 0
+                description: Seconds to keep the Job alive after the last call. 0 = fire-and-forget.
+                format: uint64
+                minimum: 0.0
+                type: integer
+              maxCalls:
+                default: 0
+                description: Maximum number of invocations. 0 = unlimited.
+                format: uint32
+                minimum: 0.0
+                type: integer
+              parameters:
+                description: JSON Schema describing tool parameters (passed through to ListTools).
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+              workingDir:
+                default: /workspace
+                description: Working directory inside the Job container.
+                type: string
+              workspacePVC:
+                default: true
+                description: Mount the workspace-data PVC into the Job.
+                type: boolean
+            required:
+            - command
+            - description
+            - image
+            - parameters
+            type: object
+        required:
+        - spec
+        title: AirlockTool
+        type: object
+    served: true
+    storage: true
+    subresources: {}

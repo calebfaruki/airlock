@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: airlock-controller
+  labels:
+    app.kubernetes.io/part-of: sycophant
+    app.kubernetes.io/component: airlock-controller
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: airlock-controller
+  labels:
+    app.kubernetes.io/part-of: sycophant
+    app.kubernetes.io/component: airlock-controller
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: ["airlock.dev"]
+    resources: ["airlocktools"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: airlock-controller
+  labels:
+    app.kubernetes.io/part-of: sycophant
+    app.kubernetes.io/component: airlock-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: airlock-controller
+subjects:
+  - kind: ServiceAccount
+    name: airlock-controller

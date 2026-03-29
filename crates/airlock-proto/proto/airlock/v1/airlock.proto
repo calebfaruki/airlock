@@ -1,0 +1,63 @@
+syntax = "proto3";
+package airlock.v1;
+
+service AirlockController {
+  // Transponder calls: list available tools
+  rpc ListTools (ListToolsRequest) returns (ListToolsResponse);
+
+  // Transponder calls: execute a tool (blocks until Job completes)
+  rpc CallTool (CallToolRequest) returns (CallToolResponse);
+
+  // Tool Job calls: pull work assignment (long-poll, blocks until ready)
+  rpc GetToolCall (GetToolCallRequest) returns (ToolCallAssignment);
+
+  // Tool Job calls: return execution result
+  rpc SendToolResult (SendToolResultRequest) returns (SendToolResultAck);
+}
+
+// -- Transponder-facing messages --
+
+message ListToolsRequest {}
+
+message ListToolsResponse {
+  repeated ToolInfo tools = 1;
+}
+
+message ToolInfo {
+  string name = 1;
+  string description = 2;
+  string parameters_json = 3;
+}
+
+message CallToolRequest {
+  string name = 1;
+  string input_json = 2;
+}
+
+message CallToolResponse {
+  string output = 1;
+  bool is_error = 2;
+}
+
+// -- Tool Job-facing messages --
+
+message GetToolCallRequest {
+  string job_id = 1;
+  string tool_name = 2;
+}
+
+message ToolCallAssignment {
+  string call_id = 1;
+  string input_json = 2;
+  string command_template = 3;
+  string working_dir = 4;
+}
+
+message SendToolResultRequest {
+  string call_id = 1;
+  string output = 2;
+  bool is_error = 3;
+  int32 exit_code = 4;
+}
+
+message SendToolResultAck {}

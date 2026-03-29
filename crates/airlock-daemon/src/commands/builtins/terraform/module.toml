@@ -1,8 +1,0 @@
-[command]
-bin = "terraform"
-
-[deny]
-args = ["destroy", "force-unlock", "apply & -auto-approve"]
-
-[exec]
-concurrent = false

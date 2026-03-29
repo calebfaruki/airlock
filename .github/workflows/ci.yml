@@ -18,6 +18,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@d1565eeb874f106d1696ad08faf835331133fe14 # 1.94.0
         with:
           components: rustfmt, clippy
+      - uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -30,6 +33,9 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@d1565eeb874f106d1696ad08faf835331133fe14 # 1.94.0
+      - uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -55,24 +61,6 @@ jobs:
         with:
           languages: actions
       - uses: github/codeql-action/analyze@b1bff81932f5cdfc8695c7752dcee935dcd061c8 # v4.33.0
-
-  fuzz:
-    needs: [test, audit]
-    runs-on: ubuntu-latest
-    concurrency:
-      group: ${{ github.workflow }}-fuzz-${{ github.ref }}
-      cancel-in-progress: true
-    steps:
-      - uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          sanitizer: address
-      - uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          fuzz-seconds: 120
-          mode: code-change
-          sanitizer: address
 
   pages:
     if: github.event_name == 'push'

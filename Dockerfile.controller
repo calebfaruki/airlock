@@ -1,0 +1,4 @@
+FROM scratch
+ARG TARGETARCH
+COPY --chmod=755 airlock-controller-linux-musl-${TARGETARCH} /usr/local/bin/airlock-controller
+ENTRYPOINT ["airlock-controller"]

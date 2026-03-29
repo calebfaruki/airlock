@@ -1,0 +1,22 @@
+apiVersion: airlock.dev/v1
+kind: AirlockTool
+metadata:
+  name: git-push-branch
+spec:
+  description: "Push current branch to remote"
+  parameters:
+    type: object
+    properties:
+      remote:
+        type: string
+        default: origin
+      branch:
+        type: string
+    required:
+      - branch
+  image: ghcr.io/calebfaruki/airlock-git:latest
+  command: "git push {remote} {branch}"
+  credential:
+    secretName: git-ssh-key
+    mountPath: /run/secrets/airlock/git
+  maxCalls: 0

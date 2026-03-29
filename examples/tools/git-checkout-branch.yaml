@@ -1,0 +1,16 @@
+apiVersion: airlock.dev/v1
+kind: AirlockTool
+metadata:
+  name: git-checkout-branch
+spec:
+  description: "Create and switch to a new branch"
+  parameters:
+    type: object
+    properties:
+      branch:
+        type: string
+    required:
+      - branch
+  image: ghcr.io/calebfaruki/airlock-git:latest
+  command: "git checkout -b {branch}"
+  maxCalls: 1

@@ -1,0 +1,487 @@
+use std::sync::Arc;
+
+use tokio::sync::oneshot;
+use tonic::{Request, Response, Status};
+use tracing::info;
+use uuid::Uuid;
+
+use airlock_proto::airlock_controller_server::AirlockController;
+use airlock_proto::{
+    CallToolRequest, CallToolResponse, GetToolCallRequest, ListToolsRequest, ListToolsResponse,
+    SendToolResultAck, SendToolResultRequest, ToolCallAssignment, ToolInfo,
+};
+
+use crate::job;
+use crate::state::{ControllerState, PendingCall, ToolCallResult};
+
+pub struct ControllerService {
+    state: Arc<ControllerState>,
+}
+
+impl ControllerService {
+    pub fn new(state: Arc<ControllerState>) -> Self {
+        Self { state }
+    }
+}
+
+#[tonic::async_trait]
+impl AirlockController for ControllerService {
+    async fn list_tools(
+        &self,
+        _request: Request<ListToolsRequest>,
+    ) -> Result<Response<ListToolsResponse>, Status> {
+        let tools = self.state.list_tools().await;
+        let tool_infos: Vec<ToolInfo> = tools
+            .iter()
+            .map(|(name, tool)| ToolInfo {
+                name: name.clone(),
+                description: tool.spec.description.clone(),
+                parameters_json: tool.spec.parameters.to_string(),
+            })
+            .collect();
+
+        Ok(Response::new(ListToolsResponse { tools: tool_infos }))
+    }
+
+    async fn call_tool(
+        &self,
+        request: Request<CallToolRequest>,
+    ) -> Result<Response<CallToolResponse>, Status> {
+        let req = request.into_inner();
+        let tool_name = &req.name;
+
+        let tool = self
+            .state
+            .get_tool(tool_name)
+            .await
+            .ok_or_else(|| Status::not_found(format!("unknown tool: {tool_name}")))?;
+
+        if tool.spec.max_calls > 0 {
+            let count = self.state.get_call_count(tool_name).await;
+            if count >= tool.spec.max_calls {
+                return Err(Status::resource_exhausted(format!(
+                    "tool {tool_name} has reached its invocation limit ({})",
+                    tool.spec.max_calls
+                )));
+            }
+            self.state.increment_call_count(tool_name).await;
+        }
+
+        let call_id = Uuid::new_v4().to_string();
+        let command_template = tool.spec.command.clone();
+        let working_dir = tool.spec.working_dir.clone();
+
+        if let Some(client) = self.state.kube_client() {
+            let job_spec = job::build_tool_job(
+                tool_name,
+                &tool.spec,
+                &call_id,
+                self.state.namespace(),
+                self.state.controller_addr(),
+                tool.spec.keepalive > 0,
+            );
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                job::create_job(client, self.state.namespace(), &job_spec),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {
+                    info!(call_id = %call_id, tool = %tool_name, "tool Job created");
+                }
+                Ok(Err(e)) => {
+                    tracing::error!(call_id = %call_id, "k8s API rejected tool Job creation: {e}");
+                    return Err(Status::internal(format!("failed to create tool Job: {e}")));
+                }
+                Err(_) => {
+                    tracing::error!(call_id = %call_id, "k8s API timed out creating tool Job (10s)");
+                    return Err(Status::internal(
+                        "k8s API timed out creating tool Job".to_string(),
+                    ));
+                }
+            }
+        }
+
+        let (result_tx, result_rx) = oneshot::channel::<ToolCallResult>();
+
+        self.state.set_result_tx(call_id.clone(), result_tx).await;
+
+        self.state
+            .enqueue_call(PendingCall {
+                call_id: call_id.clone(),
+                tool_name: tool_name.clone(),
+                input_json: req.input_json,
+                command_template,
+                working_dir,
+            })
+            .await;
+
+        info!(call_id = %call_id, tool = %tool_name, "call enqueued, waiting for result");
+
+        let result = result_rx
+            .await
+            .map_err(|_| Status::internal(format!("result channel dropped for call {call_id}")))?;
+
+        Ok(Response::new(CallToolResponse {
+            output: result.output,
+            is_error: result.is_error,
+        }))
+    }
+
+    async fn get_tool_call(
+        &self,
+        request: Request<GetToolCallRequest>,
+    ) -> Result<Response<ToolCallAssignment>, Status> {
+        let req = request.into_inner();
+        let tool_name = &req.tool_name;
+
+        loop {
+            if let Some(call) = self.state.dequeue_call(tool_name).await {
+                info!(
+                    call_id = %call.call_id,
+                    job_id = %req.job_id,
+                    tool = %tool_name,
+                    "dispatching call to agent"
+                );
+                return Ok(Response::new(ToolCallAssignment {
+                    call_id: call.call_id,
+                    input_json: call.input_json,
+                    command_template: call.command_template,
+                    working_dir: call.working_dir,
+                }));
+            }
+
+            self.state.wait_for_call().await;
+        }
+    }
+
+    async fn send_tool_result(
+        &self,
+        request: Request<SendToolResultRequest>,
+    ) -> Result<Response<SendToolResultAck>, Status> {
+        let req = request.into_inner();
+
+        let tx = self
+            .state
+            .take_result_tx(&req.call_id)
+            .await
+            .ok_or_else(|| {
+                Status::not_found(format!("no pending result for call_id: {}", req.call_id))
+            })?;
+
+        info!(call_id = %req.call_id, exit_code = req.exit_code, "received tool result");
+
+        let _ = tx.send(ToolCallResult {
+            output: req.output,
+            is_error: req.is_error,
+            exit_code: req.exit_code,
+        });
+
+        Ok(Response::new(SendToolResultAck {}))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crd::{AirlockTool, AirlockToolSpec};
+
+    fn make_tool(name: &str, description: &str, max_calls: u32) -> AirlockTool {
+        AirlockTool::new(
+            name,
+            AirlockToolSpec {
+                description: description.to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                image: "test:latest".to_string(),
+                command: "echo test".to_string(),
+                working_dir: "/workspace".to_string(),
+                workspace_pvc: true,
+                credential: None,
+                keepalive: 0,
+                max_calls,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn list_tools_empty() {
+        let state = ControllerState::new(None, String::new(), String::new());
+        let svc = ControllerService::new(state);
+        let resp = svc
+            .list_tools(Request::new(ListToolsRequest {}))
+            .await
+            .unwrap();
+        assert!(resp.get_ref().tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_tools_returns_registered_tools() {
+        let state = ControllerState::new(None, String::new(), String::new());
+        state
+            .set_tool("git-push".into(), make_tool("git-push", "Push commits", 0))
+            .await;
+        state
+            .set_tool(
+                "git-commit".into(),
+                make_tool("git-commit", "Commit changes", 0),
+            )
+            .await;
+
+        let svc = ControllerService::new(state);
+        let resp = svc
+            .list_tools(Request::new(ListToolsRequest {}))
+            .await
+            .unwrap();
+        assert_eq!(resp.get_ref().tools.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_tools_after_delete() {
+        let state = ControllerState::new(None, String::new(), String::new());
+        state
+            .set_tool("git-push".into(), make_tool("git-push", "Push commits", 0))
+            .await;
+        state.remove_tool("git-push").await;
+
+        let svc = ControllerService::new(state);
+        let resp = svc
+            .list_tools(Request::new(ListToolsRequest {}))
+            .await
+            .unwrap();
+        assert!(resp.get_ref().tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_tools_after_update() {
+        let state = ControllerState::new(None, String::new(), String::new());
+        state
+            .set_tool("git-push".into(), make_tool("git-push", "Old desc", 0))
+            .await;
+        state
+            .set_tool("git-push".into(), make_tool("git-push", "New desc", 0))
+            .await;
+
+        let svc = ControllerService::new(state);
+        let resp = svc
+            .list_tools(Request::new(ListToolsRequest {}))
+            .await
+            .unwrap();
+        assert_eq!(resp.get_ref().tools.len(), 1);
+        assert_eq!(resp.get_ref().tools[0].description, "New desc");
+    }
+
+    #[tokio::test]
+    async fn call_tool_unknown_returns_not_found() {
+        let state = ControllerState::new(None, String::new(), String::new());
+        let svc = ControllerService::new(state);
+        let err = svc
+            .call_tool(Request::new(CallToolRequest {
+                name: "nonexistent".to_string(),
+                input_json: "{}".to_string(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn call_tool_round_trip() {
+        let state = ControllerState::new(None, String::new(), String::new());
+        state
+            .set_tool("echo".into(), make_tool("echo", "Echo tool", 0))
+            .await;
+
+        let svc = Arc::new(ControllerService::new(state.clone()));
+
+        let svc_clone = svc.clone();
+        let call_handle = tokio::spawn(async move {
+            svc_clone
+                .call_tool(Request::new(CallToolRequest {
+                    name: "echo".to_string(),
+                    input_json: r#"{"msg":"hello"}"#.to_string(),
+                }))
+                .await
+        });
+
+        tokio::task::yield_now().await;
+
+        let assignment = svc
+            .get_tool_call(Request::new(GetToolCallRequest {
+                job_id: "job-1".to_string(),
+                tool_name: "echo".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(assignment.input_json, r#"{"msg":"hello"}"#);
+        assert_eq!(assignment.command_template, "echo test");
+
+        svc.send_tool_result(Request::new(SendToolResultRequest {
+            call_id: assignment.call_id,
+            output: "hello\n".to_string(),
+            is_error: false,
+            exit_code: 0,
+        }))
+        .await
+        .unwrap();
+
+        let resp = call_handle.await.unwrap().unwrap();
+        assert_eq!(resp.get_ref().output, "hello\n");
+        assert!(!resp.get_ref().is_error);
+    }
+
+    #[tokio::test]
+    async fn max_calls_enforced() {
+        let state = ControllerState::new(None, String::new(), String::new());
+        state
+            .set_tool("limited".into(), make_tool("limited", "test", 1))
+            .await;
+
+        let svc = Arc::new(ControllerService::new(state.clone()));
+
+        let svc_clone = svc.clone();
+        let call_handle = tokio::spawn(async move {
+            svc_clone
+                .call_tool(Request::new(CallToolRequest {
+                    name: "limited".to_string(),
+                    input_json: "{}".to_string(),
+                }))
+                .await
+        });
+
+        tokio::task::yield_now().await;
+
+        let assignment = svc
+            .get_tool_call(Request::new(GetToolCallRequest {
+                job_id: "job-1".to_string(),
+                tool_name: "limited".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        svc.send_tool_result(Request::new(SendToolResultRequest {
+            call_id: assignment.call_id,
+            output: "ok".to_string(),
+            is_error: false,
+            exit_code: 0,
+        }))
+        .await
+        .unwrap();
+
+        call_handle.await.unwrap().unwrap();
+
+        let err = svc
+            .call_tool(Request::new(CallToolRequest {
+                name: "limited".to_string(),
+                input_json: "{}".to_string(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::ResourceExhausted);
+    }
+
+    #[tokio::test]
+    async fn get_tool_call_blocks_until_enqueued() {
+        let state = ControllerState::new(None, String::new(), String::new());
+        state
+            .set_tool("tool".into(), make_tool("tool", "test tool", 0))
+            .await;
+
+        let svc = Arc::new(ControllerService::new(state.clone()));
+
+        let svc_for_get = svc.clone();
+        let get_handle = tokio::spawn(async move {
+            svc_for_get
+                .get_tool_call(Request::new(GetToolCallRequest {
+                    job_id: "job-1".to_string(),
+                    tool_name: "tool".to_string(),
+                }))
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!get_handle.is_finished(), "GetToolCall should be blocking");
+
+        let svc_for_call = svc.clone();
+        tokio::spawn(async move {
+            let _ = svc_for_call
+                .call_tool(Request::new(CallToolRequest {
+                    name: "tool".to_string(),
+                    input_json: r#"{"x":"1"}"#.to_string(),
+                }))
+                .await;
+        });
+
+        let assignment = tokio::time::timeout(std::time::Duration::from_secs(2), get_handle)
+            .await
+            .expect("GetToolCall should resolve within timeout")
+            .unwrap()
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(assignment.input_json, r#"{"x":"1"}"#);
+    }
+
+    #[tokio::test]
+    async fn max_calls_zero_unlimited() {
+        let state = ControllerState::new(None, String::new(), String::new());
+        state
+            .set_tool("unlimited".into(), make_tool("unlimited", "no limit", 0))
+            .await;
+
+        let svc = Arc::new(ControllerService::new(state.clone()));
+
+        for i in 0..5 {
+            let svc_clone = svc.clone();
+            let call_handle = tokio::spawn(async move {
+                svc_clone
+                    .call_tool(Request::new(CallToolRequest {
+                        name: "unlimited".to_string(),
+                        input_json: format!("{{\"{i}\":\"v\"}}"),
+                    }))
+                    .await
+            });
+
+            tokio::task::yield_now().await;
+
+            let assignment = svc
+                .get_tool_call(Request::new(GetToolCallRequest {
+                    job_id: format!("job-{i}"),
+                    tool_name: "unlimited".to_string(),
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+
+            svc.send_tool_result(Request::new(SendToolResultRequest {
+                call_id: assignment.call_id,
+                output: "ok".to_string(),
+                is_error: false,
+                exit_code: 0,
+            }))
+            .await
+            .unwrap();
+
+            let resp = call_handle.await.unwrap().unwrap();
+            assert!(!resp.get_ref().is_error);
+        }
+    }
+
+    #[tokio::test]
+    async fn send_result_unknown_call_id() {
+        let state = ControllerState::new(None, String::new(), String::new());
+        let svc = ControllerService::new(state);
+        let err = svc
+            .send_tool_result(Request::new(SendToolResultRequest {
+                call_id: "nonexistent".to_string(),
+                output: "".to_string(),
+                is_error: false,
+                exit_code: 0,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+}

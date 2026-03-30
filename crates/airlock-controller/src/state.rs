@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use tokio::sync::{oneshot, Notify, RwLock};
 
-use crate::crd::AirlockTool;
+use crate::crd::{AirlockChamber, AirlockTool};
 
 pub struct ToolCallResult {
     pub output: String,
@@ -29,6 +29,7 @@ pub struct ActiveJob {
 
 pub struct ControllerState {
     tools: RwLock<HashMap<String, AirlockTool>>,
+    chambers: RwLock<HashMap<String, AirlockChamber>>,
     pending_calls: RwLock<HashMap<String, Vec<PendingCall>>>,
     call_notify: Notify,
     result_txs: RwLock<HashMap<String, oneshot::Sender<ToolCallResult>>>,
@@ -47,6 +48,7 @@ impl ControllerState {
     ) -> Arc<Self> {
         Arc::new(Self {
             tools: RwLock::new(HashMap::new()),
+            chambers: RwLock::new(HashMap::new()),
             pending_calls: RwLock::new(HashMap::new()),
             call_notify: Notify::new(),
             result_txs: RwLock::new(HashMap::new()),
@@ -99,6 +101,28 @@ impl ControllerState {
 
     pub async fn tool_count(&self) -> usize {
         self.tools.read().await.len()
+    }
+
+    // -- Chamber registry --
+
+    pub async fn get_chamber(&self, name: &str) -> Option<AirlockChamber> {
+        self.chambers.read().await.get(name).cloned()
+    }
+
+    pub async fn set_chamber(&self, name: String, chamber: AirlockChamber) {
+        self.chambers.write().await.insert(name, chamber);
+    }
+
+    pub async fn remove_chamber(&self, name: &str) {
+        self.chambers.write().await.remove(name);
+    }
+
+    pub async fn clear_chambers(&self) {
+        self.chambers.write().await.clear();
+    }
+
+    pub async fn chamber_count(&self) -> usize {
+        self.chambers.read().await.len()
     }
 
     // -- Call queue --
@@ -182,5 +206,100 @@ impl ControllerState {
 
     pub async fn active_job_count(&self) -> usize {
         self.active_jobs.read().await.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crd::{AirlockChamber, AirlockChamberSpec, AirlockTool, AirlockToolSpec};
+
+    fn test_tool(name: &str) -> AirlockTool {
+        AirlockTool::new(
+            name,
+            AirlockToolSpec {
+                chamber: "c".to_string(),
+                description: "d".to_string(),
+                image: "i".to_string(),
+                command: "cmd".to_string(),
+                max_calls: 0,
+            },
+        )
+    }
+
+    fn test_chamber(name: &str) -> AirlockChamber {
+        AirlockChamber::new(
+            name,
+            AirlockChamberSpec {
+                workspace: "ws".to_string(),
+                workspace_mode: "readWrite".to_string(),
+                workspace_mount_path: "/workspace".to_string(),
+                credentials: vec![],
+                egress: vec![],
+                keepalive: false,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn tool_count_reflects_insertions() {
+        let state = ControllerState::new(None, String::new(), String::new());
+        assert_eq!(state.tool_count().await, 0);
+        state.set_tool("a".into(), test_tool("a")).await;
+        state.set_tool("b".into(), test_tool("b")).await;
+        assert_eq!(state.tool_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn clear_tools_empties_registry() {
+        let state = ControllerState::new(None, String::new(), String::new());
+        state.set_tool("a".into(), test_tool("a")).await;
+        state.clear_tools().await;
+        assert_eq!(state.tool_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn chamber_count_reflects_insertions() {
+        let state = ControllerState::new(None, String::new(), String::new());
+        assert_eq!(state.chamber_count().await, 0);
+        state.set_chamber("a".into(), test_chamber("a")).await;
+        state.set_chamber("b".into(), test_chamber("b")).await;
+        assert_eq!(state.chamber_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn clear_chambers_empties_registry() {
+        let state = ControllerState::new(None, String::new(), String::new());
+        state.set_chamber("a".into(), test_chamber("a")).await;
+        state.clear_chambers().await;
+        assert_eq!(state.chamber_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn wait_for_call_blocks_until_notify() {
+        let state = ControllerState::new(None, String::new(), String::new());
+        let state2 = state.clone();
+
+        let wait_handle = tokio::spawn(async move {
+            state2.wait_for_call().await;
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!wait_handle.is_finished(), "should be blocking");
+
+        state
+            .enqueue_call(PendingCall {
+                call_id: "c".into(),
+                tool_name: "t".into(),
+                input_json: "{}".into(),
+                command_template: "cmd".into(),
+                working_dir: "/w".into(),
+            })
+            .await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), wait_handle)
+            .await
+            .expect("wait_for_call should unblock")
+            .unwrap();
     }
 }

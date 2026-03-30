@@ -3,13 +3,7 @@ kind: AirlockTool
 metadata:
   name: git-commit
 spec:
+  chamber: workspace-rw
   description: "Commit staged changes with a message"
-  parameters:
-    type: object
-    properties:
-      message:
-        type: string
-    required:
-      - message
   image: ghcr.io/calebfaruki/airlock-git:latest
-  command: "git commit -m \"{message}\""
+  command: "git commit"

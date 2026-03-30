@@ -36,7 +36,7 @@ impl AirlockController for ControllerService {
             .map(|(name, tool)| ToolInfo {
                 name: name.clone(),
                 description: tool.spec.description.clone(),
-                parameters_json: tool.spec.parameters.to_string(),
+                parameters_json: "{}".to_string(),
             })
             .collect();
 
@@ -56,6 +56,14 @@ impl AirlockController for ControllerService {
             .await
             .ok_or_else(|| Status::not_found(format!("unknown tool: {tool_name}")))?;
 
+        let chamber = self
+            .state
+            .get_chamber(&tool.spec.chamber)
+            .await
+            .ok_or_else(|| {
+                Status::failed_precondition(format!("chamber {} not found", tool.spec.chamber))
+            })?;
+
         if tool.spec.max_calls > 0 {
             let count = self.state.get_call_count(tool_name).await;
             if count >= tool.spec.max_calls {
@@ -69,16 +77,16 @@ impl AirlockController for ControllerService {
 
         let call_id = Uuid::new_v4().to_string();
         let command_template = tool.spec.command.clone();
-        let working_dir = tool.spec.working_dir.clone();
+        let working_dir = chamber.spec.workspace_mount_path.clone();
 
         if let Some(client) = self.state.kube_client() {
             let job_spec = job::build_tool_job(
                 tool_name,
                 &tool.spec,
+                &chamber.spec,
                 &call_id,
                 self.state.namespace(),
                 self.state.controller_addr(),
-                tool.spec.keepalive > 0,
             );
             match tokio::time::timeout(
                 std::time::Duration::from_secs(10),
@@ -95,9 +103,7 @@ impl AirlockController for ControllerService {
                 }
                 Err(_) => {
                     tracing::error!(call_id = %call_id, "k8s API timed out creating tool Job (10s)");
-                    return Err(Status::internal(
-                        "k8s API timed out creating tool Job".to_string(),
-                    ));
+                    return Err(Status::internal("k8s API timed out creating tool Job"));
                 }
             }
         }
@@ -184,20 +190,30 @@ impl AirlockController for ControllerService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{AirlockTool, AirlockToolSpec};
+    use crate::crd::{AirlockChamber, AirlockChamberSpec, AirlockTool, AirlockToolSpec};
+
+    fn make_chamber(name: &str) -> AirlockChamber {
+        AirlockChamber::new(
+            name,
+            AirlockChamberSpec {
+                workspace: "workspace-data".to_string(),
+                workspace_mode: "readWrite".to_string(),
+                workspace_mount_path: "/workspace".to_string(),
+                credentials: vec![],
+                egress: vec![],
+                keepalive: false,
+            },
+        )
+    }
 
     fn make_tool(name: &str, description: &str, max_calls: u32) -> AirlockTool {
         AirlockTool::new(
             name,
             AirlockToolSpec {
+                chamber: "test-chamber".to_string(),
                 description: description.to_string(),
-                parameters: serde_json::json!({"type": "object"}),
                 image: "test:latest".to_string(),
                 command: "echo test".to_string(),
-                working_dir: "/workspace".to_string(),
-                workspace_pvc: true,
-                credential: None,
-                keepalive: 0,
                 max_calls,
             },
         )
@@ -285,10 +301,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn call_tool_missing_chamber_returns_failed_precondition() {
+        let state = ControllerState::new(None, String::new(), String::new());
+        state
+            .set_tool("echo".into(), make_tool("echo", "Echo tool", 0))
+            .await;
+
+        let svc = ControllerService::new(state);
+        let err = svc
+            .call_tool(Request::new(CallToolRequest {
+                name: "echo".to_string(),
+                input_json: "{}".to_string(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
     async fn call_tool_round_trip() {
         let state = ControllerState::new(None, String::new(), String::new());
         state
             .set_tool("echo".into(), make_tool("echo", "Echo tool", 0))
+            .await;
+        state
+            .set_chamber("test-chamber".into(), make_chamber("test-chamber"))
             .await;
 
         let svc = Arc::new(ControllerService::new(state.clone()));
@@ -305,14 +342,17 @@ mod tests {
 
         tokio::task::yield_now().await;
 
-        let assignment = svc
-            .get_tool_call(Request::new(GetToolCallRequest {
+        let assignment = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            svc.get_tool_call(Request::new(GetToolCallRequest {
                 job_id: "job-1".to_string(),
                 tool_name: "echo".to_string(),
-            }))
-            .await
-            .unwrap()
-            .into_inner();
+            })),
+        )
+        .await
+        .expect("get_tool_call timed out")
+        .unwrap()
+        .into_inner();
 
         assert_eq!(assignment.input_json, r#"{"msg":"hello"}"#);
         assert_eq!(assignment.command_template, "echo test");
@@ -326,7 +366,11 @@ mod tests {
         .await
         .unwrap();
 
-        let resp = call_handle.await.unwrap().unwrap();
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(2), call_handle)
+            .await
+            .expect("call_tool timed out")
+            .unwrap()
+            .unwrap();
         assert_eq!(resp.get_ref().output, "hello\n");
         assert!(!resp.get_ref().is_error);
     }
@@ -336,6 +380,9 @@ mod tests {
         let state = ControllerState::new(None, String::new(), String::new());
         state
             .set_tool("limited".into(), make_tool("limited", "test", 1))
+            .await;
+        state
+            .set_chamber("test-chamber".into(), make_chamber("test-chamber"))
             .await;
 
         let svc = Arc::new(ControllerService::new(state.clone()));
@@ -352,14 +399,17 @@ mod tests {
 
         tokio::task::yield_now().await;
 
-        let assignment = svc
-            .get_tool_call(Request::new(GetToolCallRequest {
+        let assignment = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            svc.get_tool_call(Request::new(GetToolCallRequest {
                 job_id: "job-1".to_string(),
                 tool_name: "limited".to_string(),
-            }))
-            .await
-            .unwrap()
-            .into_inner();
+            })),
+        )
+        .await
+        .expect("get_tool_call timed out")
+        .unwrap()
+        .into_inner();
 
         svc.send_tool_result(Request::new(SendToolResultRequest {
             call_id: assignment.call_id,
@@ -370,7 +420,11 @@ mod tests {
         .await
         .unwrap();
 
-        call_handle.await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), call_handle)
+            .await
+            .expect("call_tool timed out")
+            .unwrap()
+            .unwrap();
 
         let err = svc
             .call_tool(Request::new(CallToolRequest {
@@ -387,6 +441,9 @@ mod tests {
         let state = ControllerState::new(None, String::new(), String::new());
         state
             .set_tool("tool".into(), make_tool("tool", "test tool", 0))
+            .await;
+        state
+            .set_chamber("test-chamber".into(), make_chamber("test-chamber"))
             .await;
 
         let svc = Arc::new(ControllerService::new(state.clone()));
@@ -430,6 +487,9 @@ mod tests {
         state
             .set_tool("unlimited".into(), make_tool("unlimited", "no limit", 0))
             .await;
+        state
+            .set_chamber("test-chamber".into(), make_chamber("test-chamber"))
+            .await;
 
         let svc = Arc::new(ControllerService::new(state.clone()));
 
@@ -446,14 +506,17 @@ mod tests {
 
             tokio::task::yield_now().await;
 
-            let assignment = svc
-                .get_tool_call(Request::new(GetToolCallRequest {
+            let assignment = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                svc.get_tool_call(Request::new(GetToolCallRequest {
                     job_id: format!("job-{i}"),
                     tool_name: "unlimited".to_string(),
-                }))
-                .await
-                .unwrap()
-                .into_inner();
+                })),
+            )
+            .await
+            .expect("get_tool_call timed out")
+            .unwrap()
+            .into_inner();
 
             svc.send_tool_result(Request::new(SendToolResultRequest {
                 call_id: assignment.call_id,
@@ -464,7 +527,11 @@ mod tests {
             .await
             .unwrap();
 
-            let resp = call_handle.await.unwrap().unwrap();
+            let resp = tokio::time::timeout(std::time::Duration::from_secs(2), call_handle)
+                .await
+                .expect("call_tool timed out")
+                .unwrap()
+                .unwrap();
             assert!(!resp.get_ref().is_error);
         }
     }

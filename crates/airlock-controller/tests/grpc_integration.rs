@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use airlock_controller::crd::{AirlockTool, AirlockToolSpec};
+use airlock_controller::crd::{AirlockChamber, AirlockChamberSpec, AirlockTool, AirlockToolSpec};
 use airlock_controller::grpc::ControllerService;
 use airlock_controller::state::ControllerState;
 use airlock_proto::airlock_controller_client::AirlockControllerClient;
@@ -29,18 +29,28 @@ async fn start_server() -> (String, Arc<ControllerState>) {
     (url, state)
 }
 
+fn make_chamber(name: &str) -> AirlockChamber {
+    AirlockChamber::new(
+        name,
+        AirlockChamberSpec {
+            workspace: "workspace-data".to_string(),
+            workspace_mode: "readWrite".to_string(),
+            workspace_mount_path: "/workspace".to_string(),
+            credentials: vec![],
+            egress: vec![],
+            keepalive: false,
+        },
+    )
+}
+
 fn make_tool(name: &str, description: &str) -> AirlockTool {
     AirlockTool::new(
         name,
         AirlockToolSpec {
+            chamber: "test-chamber".to_string(),
             description: description.to_string(),
-            parameters: serde_json::json!({"type": "object"}),
             image: "test:latest".to_string(),
             command: "echo {msg}".to_string(),
-            working_dir: "/workspace".to_string(),
-            workspace_pvc: true,
-            credential: None,
-            keepalive: 0,
             max_calls: 0,
         },
     )
@@ -91,10 +101,12 @@ async fn call_tool_round_trip_over_grpc() {
     state
         .set_tool("echo".into(), make_tool("echo", "Echo tool"))
         .await;
+    state
+        .set_chamber("test-chamber".into(), make_chamber("test-chamber"))
+        .await;
 
     let agent_url = url.clone();
 
-    // Spawn simulated agent: GetToolCall -> SendToolResult
     let agent = tokio::spawn(async move {
         let mut client = AirlockControllerClient::connect(agent_url).await.unwrap();
 
@@ -120,7 +132,6 @@ async fn call_tool_round_trip_over_grpc() {
             .unwrap();
     });
 
-    // Transponder calls CallTool (blocks until agent resolves it)
     let mut client = AirlockControllerClient::connect(url).await.unwrap();
     let resp = client
         .call_tool(CallToolRequest {

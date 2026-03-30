@@ -77,9 +77,9 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
-            artifact: airlock-agent-linux-amd64
+            artifact: airlock-runtime-linux-amd64
           - target: aarch64-unknown-linux-musl
-            artifact: airlock-agent-linux-arm64
+            artifact: airlock-runtime-linux-arm64
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -101,9 +101,9 @@ jobs:
           echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
       - name: Build static binary
         run: |
-          RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target ${{ matrix.target }} -p airlock-agent
+          RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target ${{ matrix.target }} -p airlock-runtime
       - name: Rename artifact
-        run: cp target/${{ matrix.target }}/release/airlock-agent ${{ matrix.artifact }}
+        run: cp target/${{ matrix.target }}/release/airlock-runtime ${{ matrix.artifact }}
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: ${{ matrix.artifact }}
@@ -134,7 +134,7 @@ jobs:
         with:
           subject-path: |
             artifacts/airlock-controller-*
-            artifacts/airlock-agent-*
+            artifacts/airlock-runtime-*
       - name: Extract changelog
         run: |
           if [ -f CHANGELOG.md ]; then
@@ -205,8 +205,8 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/${{ github.repository_owner }}/airlock-agent:${{ github.ref_name }}
-            ghcr.io/${{ github.repository_owner }}/airlock-agent:latest
+            ghcr.io/${{ github.repository_owner }}/airlock-runtime:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/airlock-runtime:latest
 
   publish-tool-images:
     needs: [build-agent]

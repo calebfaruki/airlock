@@ -1,0 +1,8 @@
+apiVersion: airlock.dev/v1
+kind: AirlockChamber
+metadata:
+  name: workspace-rw
+spec:
+  workspace: workspace-data
+  workspaceMode: readWrite
+  keepalive: true

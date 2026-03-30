@@ -48,32 +48,51 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = ([0, 0, 0, 0], args.port).into();
     info!(%addr, namespace = %args.namespace, "starting airlock-controller");
 
-    let (ready_tx, mut ready_rx) = tokio::sync::watch::channel(false);
+    let (tool_ready_tx, mut tool_ready_rx) = tokio::sync::watch::channel(false);
+    let (chamber_ready_tx, mut chamber_ready_rx) = tokio::sync::watch::channel(false);
 
-    let watcher_namespace = args.namespace.clone();
-    let watcher_state = state.clone();
-    let watcher_handle = tokio::spawn(async move {
+    let tool_watcher_ns = args.namespace.clone();
+    let tool_watcher_state = state.clone();
+    let tool_watcher_handle = tokio::spawn(async move {
         let client = match kube::Client::try_default().await {
             Ok(c) => c,
             Err(e) => {
-                error!("watcher kube client failed: {e}");
+                error!("tool watcher kube client failed: {e}");
                 return Ok(());
             }
         };
-        watcher::watch_tools(client, &watcher_namespace, watcher_state, ready_tx).await
+        watcher::watch_tools(client, &tool_watcher_ns, tool_watcher_state, tool_ready_tx).await
+    });
+
+    let chamber_watcher_ns = args.namespace.clone();
+    let chamber_watcher_state = state.clone();
+    let chamber_watcher_handle = tokio::spawn(async move {
+        let client = match kube::Client::try_default().await {
+            Ok(c) => c,
+            Err(e) => {
+                error!("chamber watcher kube client failed: {e}");
+                return Ok(());
+            }
+        };
+        watcher::watch_chambers(
+            client,
+            &chamber_watcher_ns,
+            chamber_watcher_state,
+            chamber_ready_tx,
+        )
+        .await
     });
 
     let grpc_state = state.clone();
     let grpc_handle = tokio::spawn(async move {
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            ready_rx.wait_for(|&v| v),
-        )
+        match tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let _ = tool_ready_rx.wait_for(|&v| v).await;
+            let _ = chamber_ready_rx.wait_for(|&v| v).await;
+        })
         .await
         {
-            Ok(Ok(_)) => info!("watcher initial sync complete, starting gRPC server"),
-            Ok(Err(_)) => warn!("watcher channel closed before sync, starting gRPC server"),
-            Err(_) => warn!("watcher sync timed out after 10s, starting gRPC server"),
+            Ok(()) => info!("watcher initial syncs complete, starting gRPC server"),
+            Err(_) => warn!("watcher syncs timed out after 10s, starting gRPC server"),
         }
 
         let (health_reporter, health_service) = tonic_health::server::health_reporter();
@@ -89,17 +108,17 @@ async fn main() -> anyhow::Result<()> {
             .await
     });
 
-    let keepalive_state = state.clone();
-    let keepalive_handle = tokio::spawn(async move {
-        keepalive::cleanup_loop(keepalive_state).await;
-    });
+    let keepalive_handle = tokio::spawn(keepalive::cleanup_loop(state));
 
     tokio::select! {
         result = grpc_handle => {
             error!("gRPC server exited: {:?}", result);
         }
-        result = watcher_handle => {
-            error!("CRD watcher exited: {:?}", result);
+        result = tool_watcher_handle => {
+            error!("tool watcher exited: {:?}", result);
+        }
+        result = chamber_watcher_handle => {
+            error!("chamber watcher exited: {:?}", result);
         }
         _ = keepalive_handle => {
             error!("keepalive cleanup task exited");

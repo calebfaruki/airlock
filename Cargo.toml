@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/airlock-proto", "crates/airlock-controller", "crates/airlock-agent"]
+members = ["crates/airlock-proto", "crates/airlock-controller", "crates/airlock-runtime"]
 resolver = "2"
 
 [workspace.package]

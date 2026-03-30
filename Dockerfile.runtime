@@ -1,0 +1,3 @@
+FROM scratch
+ARG TARGETARCH
+COPY --chmod=755 airlock-runtime-linux-${TARGETARCH} /airlock-runtime

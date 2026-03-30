@@ -1,0 +1,16 @@
+apiVersion: airlock.dev/v1
+kind: AirlockChamber
+metadata:
+  name: git-ops
+spec:
+  workspace: workspace-data
+  workspaceMode: readWrite
+  credentials:
+    - secret: git-ssh-key
+      key: id_ed25519
+      file: /run/secrets/airlock/git/id_ed25519
+  egress:
+    - host: github.com
+      port: 22
+    - host: github.com
+      port: 443

@@ -1,17 +1,24 @@
 [package]
-name = "airlock-agent"
+name = "airlock-runtime"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 airlock-proto = { path = "../airlock-proto" }
-tonic = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+base64 = "0.22"
+urlencoding = "2"
+shell-words = "1"
+
+[dev-dependencies]
+tempfile = "3"
+serial_test = "3"
 
 [lints]
 workspace = true

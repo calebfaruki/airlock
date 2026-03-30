@@ -107,7 +107,7 @@ async fn call_tool_round_trip_over_grpc() {
 
     let agent_url = url.clone();
 
-    let agent = tokio::spawn(async move {
+    let runtime = tokio::spawn(async move {
         let mut client = AirlockControllerClient::connect(agent_url).await.unwrap();
 
         let assignment = client
@@ -145,5 +145,5 @@ async fn call_tool_round_trip_over_grpc() {
     assert_eq!(resp.output, "hello world\n");
     assert!(!resp.is_error);
 
-    agent.await.unwrap();
+    runtime.await.unwrap();
 }

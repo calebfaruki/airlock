@@ -147,7 +147,7 @@ impl AirlockController for ControllerService {
                     call_id = %call.call_id,
                     job_id = %req.job_id,
                     tool = %tool_name,
-                    "dispatching call to agent"
+                    "dispatching call to runtime"
                 );
                 return Ok(Response::new(ToolCallAssignment {
                     call_id: call.call_id,

@@ -28,8 +28,8 @@ gRPC over HTTP/2. Service: `airlock.v1.AirlockController`.
 |-----|-----------|---------|
 | `ListTools` | transponder → controller | List available tools from CRDs |
 | `CallTool` | transponder → controller | Execute a tool (blocks until Job completes) |
-| `GetToolCall` | agent → controller | Pull work assignment (long-poll) |
-| `SendToolResult` | agent → controller | Return execution result |
+| `GetToolCall` | runtime → controller | Pull work assignment (long-poll) |
+| `SendToolResult` | runtime → controller | Return execution result |
 
 Proto definition: `crates/airlock-proto/proto/airlock/v1/airlock.proto`
 

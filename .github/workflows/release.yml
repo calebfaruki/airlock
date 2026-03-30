@@ -72,7 +72,7 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
 
-  build-agent:
+  build-runtime:
     strategy:
       matrix:
         include:
@@ -110,7 +110,7 @@ jobs:
           path: ${{ matrix.artifact }}
 
   release:
-    needs: [build-controller, build-agent]
+    needs: [build-controller, build-runtime]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -178,8 +178,8 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/airlock-controller:${{ github.ref_name }}
             ghcr.io/${{ github.repository_owner }}/airlock-controller:latest
 
-  publish-agent-image:
-    needs: [build-agent]
+  publish-runtime-image:
+    needs: [build-runtime]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -201,7 +201,7 @@ jobs:
       - uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
           context: artifacts
-          file: Dockerfile.agent
+          file: Dockerfile.runtime
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
@@ -209,7 +209,7 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/airlock-runtime:latest
 
   publish-tool-images:
-    needs: [build-agent]
+    needs: [build-runtime]
     strategy:
       matrix:
         tool: [git]

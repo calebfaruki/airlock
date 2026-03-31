@@ -36,7 +36,7 @@ impl AirlockController for ControllerService {
             .map(|(name, tool)| ToolInfo {
                 name: name.clone(),
                 description: tool.spec.description.clone(),
-                parameters_json: "{}".to_string(),
+                parameters_json: r#"{"type":"object"}"#.to_string(),
             })
             .collect();
 
@@ -249,6 +249,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.get_ref().tools.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_tools_parameters_json_is_valid_schema() {
+        let state = ControllerState::new(None, String::new(), String::new());
+        state
+            .set_tool("test".into(), make_tool("test", "Test", 0))
+            .await;
+        let svc = ControllerService::new(state);
+        let resp = svc
+            .list_tools(Request::new(ListToolsRequest {}))
+            .await
+            .unwrap();
+        let params: serde_json::Value =
+            serde_json::from_str(&resp.get_ref().tools[0].parameters_json).unwrap();
+        assert_eq!(params["type"], "object");
     }
 
     #[tokio::test]

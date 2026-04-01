@@ -19,6 +19,9 @@ spec:
     - jsonPath: .spec.workspaceMode
       name: Mode
       type: string
+    - jsonPath: .spec.image
+      name: Image
+      type: string
     - jsonPath: .spec.keepalive
       name: Keepalive
       type: boolean
@@ -65,6 +68,9 @@ spec:
                   - port
                   type: object
                 type: array
+              image:
+                nullable: true
+                type: string
               keepalive:
                 default: false
                 type: boolean

@@ -9,11 +9,12 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::PostParams;
 use kube::{Api, Client};
 
-use crate::crd::{AirlockChamberSpec, AirlockToolSpec};
+use crate::crd::AirlockChamberSpec;
 
 pub fn build_tool_job(
     tool_name: &str,
-    tool_spec: &AirlockToolSpec,
+    image: &str,
+    chamber_name: &str,
     chamber_spec: &AirlockChamberSpec,
     call_id: &str,
     namespace: &str,
@@ -36,11 +37,6 @@ pub fn build_tool_job(
         EnvVar {
             name: "AIRLOCK_TOOL_NAME".to_string(),
             value: Some(tool_name.to_string()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "AIRLOCK_EXEC_MODE".to_string(),
-            value: Some("execve".to_string()),
             ..Default::default()
         },
     ];
@@ -152,7 +148,7 @@ pub fn build_tool_job(
 
     let container = Container {
         name: "runtime".to_string(),
-        image: Some(tool_spec.image.clone()),
+        image: Some(image.to_string()),
         env: Some(env_vars),
         volume_mounts: Some(volume_mounts),
         ..Default::default()
@@ -165,10 +161,10 @@ pub fn build_tool_job(
     );
     labels.insert("airlock.dev/tool".to_string(), tool_name.to_string());
     labels.insert("airlock.dev/call-id".to_string(), call_id.to_string());
-    labels.insert("airlock.dev/chamber".to_string(), tool_spec.chamber.clone());
+    labels.insert("airlock.dev/chamber".to_string(), chamber_name.to_string());
 
     let mut pod_labels = BTreeMap::new();
-    pod_labels.insert("airlock.dev/chamber".to_string(), tool_spec.chamber.clone());
+    pod_labels.insert("airlock.dev/chamber".to_string(), chamber_name.to_string());
     pod_labels.insert("airlock.dev/tool".to_string(), tool_name.to_string());
 
     Job {
@@ -213,22 +209,15 @@ pub async fn create_job(client: &Client, namespace: &str, job: &Job) -> anyhow::
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{AirlockChamberSpec, AirlockToolSpec, CredentialMapping};
+    use crate::crd::{AirlockChamberSpec, CredentialMapping};
 
     const TEST_CALL_ID: &str = "abcdef12-0000-0000-0000-000000000000";
-
-    fn base_tool_spec() -> AirlockToolSpec {
-        AirlockToolSpec {
-            chamber: "test-chamber".to_string(),
-            description: "test tool".to_string(),
-            image: "ghcr.io/test/airlock-git:latest".to_string(),
-            command: "git push".to_string(),
-            max_calls: 0,
-        }
-    }
+    const TEST_IMAGE: &str = "ghcr.io/test/airlock-git:latest";
+    const TEST_CHAMBER: &str = "test-chamber";
 
     fn base_chamber_spec() -> AirlockChamberSpec {
         AirlockChamberSpec {
+            image: Some(TEST_IMAGE.into()),
             workspace: "workspace-data".to_string(),
             workspace_mode: "readWrite".to_string(),
             workspace_mount_path: "/workspace".to_string(),
@@ -238,10 +227,11 @@ mod tests {
         }
     }
 
-    fn test_job(tool_spec: &AirlockToolSpec, chamber_spec: &AirlockChamberSpec) -> Job {
+    fn test_job(chamber_spec: &AirlockChamberSpec) -> Job {
         build_tool_job(
             "git-push",
-            tool_spec,
+            TEST_IMAGE,
+            TEST_CHAMBER,
             chamber_spec,
             TEST_CALL_ID,
             "test-ns",
@@ -269,7 +259,7 @@ mod tests {
 
     #[test]
     fn job_has_correct_metadata() {
-        let job = test_job(&base_tool_spec(), &base_chamber_spec());
+        let job = test_job(&base_chamber_spec());
 
         assert_eq!(
             job.metadata.name.as_deref(),
@@ -285,7 +275,7 @@ mod tests {
 
     #[test]
     fn pod_template_has_chamber_label() {
-        let job = test_job(&base_tool_spec(), &base_chamber_spec());
+        let job = test_job(&base_chamber_spec());
         let pod_labels = job
             .spec
             .as_ref()
@@ -303,13 +293,12 @@ mod tests {
 
     #[test]
     fn job_has_correct_env_vars() {
-        let job = test_job(&base_tool_spec(), &base_chamber_spec());
+        let job = test_job(&base_chamber_spec());
         let env = env_map(&job);
 
         assert_eq!(env["AIRLOCK_CONTROLLER_ADDR"], "http://controller:9090");
         assert_eq!(env["AIRLOCK_JOB_ID"], TEST_CALL_ID);
         assert_eq!(env["AIRLOCK_TOOL_NAME"], "git-push");
-        assert_eq!(env["AIRLOCK_EXEC_MODE"], "execve");
         assert!(!env.contains_key("AIRLOCK_KEEPALIVE"));
     }
 
@@ -317,7 +306,7 @@ mod tests {
     fn keepalive_job_has_env_and_restart_policy() {
         let mut chamber = base_chamber_spec();
         chamber.keepalive = true;
-        let job = test_job(&base_tool_spec(), &chamber);
+        let job = test_job(&chamber);
         let env = env_map(&job);
 
         assert_eq!(env.get("AIRLOCK_KEEPALIVE"), Some(&"true"));
@@ -326,14 +315,14 @@ mod tests {
 
     #[test]
     fn fire_and_forget_restart_policy() {
-        let job = test_job(&base_tool_spec(), &base_chamber_spec());
+        let job = test_job(&base_chamber_spec());
         assert_eq!(pod_spec(&job).restart_policy.as_deref(), Some("Never"));
         assert_eq!(job.spec.as_ref().unwrap().backoff_limit, Some(0));
     }
 
     #[test]
     fn workspace_pvc_mounted() {
-        let job = test_job(&base_tool_spec(), &base_chamber_spec());
+        let job = test_job(&base_chamber_spec());
         let volumes = pod_spec(&job).volumes.as_ref().unwrap();
         let ws_vol = volumes.iter().find(|v| v.name == "workspace").unwrap();
         let pvc = ws_vol.persistent_volume_claim.as_ref().unwrap();
@@ -350,7 +339,7 @@ mod tests {
     fn workspace_read_only() {
         let mut chamber = base_chamber_spec();
         chamber.workspace_mode = "readOnly".to_string();
-        let job = test_job(&base_tool_spec(), &chamber);
+        let job = test_job(&chamber);
 
         let volumes = pod_spec(&job).volumes.as_ref().unwrap();
         let ws_vol = volumes.iter().find(|v| v.name == "workspace").unwrap();
@@ -374,7 +363,7 @@ mod tests {
             file: None,
         });
 
-        let job = test_job(&base_tool_spec(), &chamber);
+        let job = test_job(&chamber);
         let env_vars = container(&job).env.as_ref().unwrap();
         let gh_env = env_vars.iter().find(|e| e.name == "GITHUB_TOKEN").unwrap();
 
@@ -399,7 +388,7 @@ mod tests {
             file: Some("/run/secrets/airlock/git/id_ed25519".to_string()),
         });
 
-        let job = test_job(&base_tool_spec(), &chamber);
+        let job = test_job(&chamber);
         let volumes = pod_spec(&job).volumes.as_ref().unwrap();
         let cred_vol = volumes.iter().find(|v| v.name == "cred-0").unwrap();
         let secret = cred_vol.secret.as_ref().unwrap();
@@ -415,7 +404,7 @@ mod tests {
 
     #[test]
     fn ttl_seconds_set() {
-        let job = test_job(&base_tool_spec(), &base_chamber_spec());
+        let job = test_job(&base_chamber_spec());
         assert_eq!(
             job.spec.as_ref().unwrap().ttl_seconds_after_finished,
             Some(30)
@@ -424,7 +413,7 @@ mod tests {
 
     #[test]
     fn correct_image() {
-        let job = test_job(&base_tool_spec(), &base_chamber_spec());
+        let job = test_job(&base_chamber_spec());
         assert_eq!(
             container(&job).image.as_deref(),
             Some("ghcr.io/test/airlock-git:latest")
@@ -443,7 +432,7 @@ mod tests {
 
     #[test]
     fn scrub_secrets_env_var_absent_for_zero_credential_chamber() {
-        let job = test_job(&base_tool_spec(), &base_chamber_spec());
+        let job = test_job(&base_chamber_spec());
         assert!(scrub_env(&job).is_none());
     }
 
@@ -456,7 +445,7 @@ mod tests {
             env: Some("DATABASE_URL".to_string()),
             file: None,
         });
-        let job = test_job(&base_tool_spec(), &chamber);
+        let job = test_job(&chamber);
         assert!(scrub_env(&job).is_some());
     }
 
@@ -469,7 +458,7 @@ mod tests {
             env: Some("STRIPE_KEY".to_string()),
             file: None,
         });
-        let job = test_job(&base_tool_spec(), &chamber);
+        let job = test_job(&chamber);
         let json: Vec<serde_json::Value> = serde_json::from_str(&scrub_env(&job).unwrap()).unwrap();
         assert_eq!(json[0]["name"], "stripe-key");
         assert_eq!(json[0]["env"], "STRIPE_KEY");
@@ -485,7 +474,7 @@ mod tests {
             env: None,
             file: Some("/run/secrets/ssh/id_ed25519".to_string()),
         });
-        let job = test_job(&base_tool_spec(), &chamber);
+        let job = test_job(&chamber);
         let json: Vec<serde_json::Value> = serde_json::from_str(&scrub_env(&job).unwrap()).unwrap();
         assert_eq!(json[0]["name"], "ssh-key");
         assert_eq!(json[0]["file"], "/run/secrets/ssh/id_ed25519");
@@ -494,7 +483,7 @@ mod tests {
 
     #[test]
     fn share_process_namespace_disabled() {
-        let job = test_job(&base_tool_spec(), &base_chamber_spec());
+        let job = test_job(&base_chamber_spec());
         assert_eq!(pod_spec(&job).share_process_namespace, Some(false));
     }
 }

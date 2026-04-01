@@ -103,16 +103,4 @@ mod tests {
         remove_expired_jobs(&state, &expired).await;
         assert_eq!(state.active_job_count().await, 0);
     }
-
-    #[tokio::test]
-    async fn counters_independent_per_tool() {
-        let state = ControllerState::new(None, String::new(), String::new());
-        state.increment_call_count("tool-a").await;
-        state.increment_call_count("tool-a").await;
-        state.increment_call_count("tool-a").await;
-        state.increment_call_count("tool-b").await;
-
-        assert_eq!(state.get_call_count("tool-a").await, 3);
-        assert_eq!(state.get_call_count("tool-b").await, 1);
-    }
 }

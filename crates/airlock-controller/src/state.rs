@@ -3,8 +3,16 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::sync::{oneshot, Notify, RwLock};
+use tracing::warn;
 
-use crate::crd::{AirlockChamber, AirlockTool};
+use crate::crd::AirlockChamber;
+
+pub struct RegisteredTool {
+    pub name: String,
+    pub chamber_name: String,
+    pub description: String,
+    pub image: String,
+}
 
 pub struct ToolCallResult {
     pub output: String,
@@ -28,13 +36,12 @@ pub struct ActiveJob {
 }
 
 pub struct ControllerState {
-    tools: RwLock<HashMap<String, AirlockTool>>,
+    tools: RwLock<HashMap<String, RegisteredTool>>,
     chambers: RwLock<HashMap<String, AirlockChamber>>,
     pending_calls: RwLock<HashMap<String, Vec<PendingCall>>>,
     call_notify: Notify,
     result_txs: RwLock<HashMap<String, oneshot::Sender<ToolCallResult>>>,
     active_jobs: RwLock<HashMap<String, ActiveJob>>,
-    call_counts: RwLock<HashMap<String, u32>>,
     kube_client: Option<kube::Client>,
     namespace: String,
     controller_addr: String,
@@ -53,7 +60,6 @@ impl ControllerState {
             call_notify: Notify::new(),
             result_txs: RwLock::new(HashMap::new()),
             active_jobs: RwLock::new(HashMap::new()),
-            call_counts: RwLock::new(HashMap::new()),
             kube_client,
             namespace,
             controller_addr,
@@ -74,25 +80,57 @@ impl ControllerState {
 
     // -- Tool registry --
 
-    pub async fn get_tool(&self, name: &str) -> Option<AirlockTool> {
-        self.tools.read().await.get(name).cloned()
+    pub async fn get_tool(&self, name: &str) -> Option<(String, String, String)> {
+        let tools = self.tools.read().await;
+        tools.get(name).map(|t| {
+            (
+                t.chamber_name.clone(),
+                t.image.clone(),
+                t.description.clone(),
+            )
+        })
     }
 
-    pub async fn list_tools(&self) -> Vec<(String, AirlockTool)> {
+    pub async fn list_tools(&self) -> Vec<(String, RegisteredTool)> {
         self.tools
             .read()
             .await
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    RegisteredTool {
+                        name: v.name.clone(),
+                        chamber_name: v.chamber_name.clone(),
+                        description: v.description.clone(),
+                        image: v.image.clone(),
+                    },
+                )
+            })
             .collect()
     }
 
-    pub async fn set_tool(&self, name: String, tool: AirlockTool) {
-        self.tools.write().await.insert(name, tool);
+    pub async fn set_tools_for_chamber(&self, chamber_name: &str, tools: Vec<RegisteredTool>) {
+        let mut registry = self.tools.write().await;
+        registry.retain(|_, t| t.chamber_name != chamber_name);
+        for tool in tools {
+            if registry.contains_key(&tool.name) {
+                warn!(
+                    tool = %tool.name,
+                    chamber = %chamber_name,
+                    "duplicate tool name, first chamber wins"
+                );
+                continue;
+            }
+            registry.insert(tool.name.clone(), tool);
+        }
     }
 
-    pub async fn remove_tool(&self, name: &str) {
-        self.tools.write().await.remove(name);
+    pub async fn remove_tools_for_chamber(&self, chamber_name: &str) {
+        self.tools
+            .write()
+            .await
+            .retain(|_, t| t.chamber_name != chamber_name);
     }
 
     pub async fn clear_tools(&self) {
@@ -161,23 +199,6 @@ impl ControllerState {
         self.result_txs.write().await.remove(call_id)
     }
 
-    // -- Call counters --
-
-    pub async fn get_call_count(&self, tool_name: &str) -> u32 {
-        self.call_counts
-            .read()
-            .await
-            .get(tool_name)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    pub async fn increment_call_count(&self, tool_name: &str) {
-        let mut counts = self.call_counts.write().await;
-        let count = counts.entry(tool_name.to_string()).or_insert(0);
-        *count += 1;
-    }
-
     // -- Active jobs (keepalive) --
 
     pub async fn list_active_jobs(&self) -> Vec<(String, String, u64, Instant)> {
@@ -212,25 +233,13 @@ impl ControllerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{AirlockChamber, AirlockChamberSpec, AirlockTool, AirlockToolSpec};
-
-    fn test_tool(name: &str) -> AirlockTool {
-        AirlockTool::new(
-            name,
-            AirlockToolSpec {
-                chamber: "c".to_string(),
-                description: "d".to_string(),
-                image: "i".to_string(),
-                command: "cmd".to_string(),
-                max_calls: 0,
-            },
-        )
-    }
+    use crate::crd::{AirlockChamber, AirlockChamberSpec};
 
     fn test_chamber(name: &str) -> AirlockChamber {
         AirlockChamber::new(
             name,
             AirlockChamberSpec {
+                image: None,
                 workspace: "ws".to_string(),
                 workspace_mode: "readWrite".to_string(),
                 workspace_mount_path: "/workspace".to_string(),
@@ -241,21 +250,81 @@ mod tests {
         )
     }
 
+    fn test_registered_tool(name: &str, chamber: &str) -> RegisteredTool {
+        RegisteredTool {
+            name: name.to_string(),
+            chamber_name: chamber.to_string(),
+            description: format!("Execute a {name} command."),
+            image: "test:latest".to_string(),
+        }
+    }
+
     #[tokio::test]
     async fn tool_count_reflects_insertions() {
         let state = ControllerState::new(None, String::new(), String::new());
         assert_eq!(state.tool_count().await, 0);
-        state.set_tool("a".into(), test_tool("a")).await;
-        state.set_tool("b".into(), test_tool("b")).await;
+        state
+            .set_tools_for_chamber(
+                "c1",
+                vec![
+                    test_registered_tool("git", "c1"),
+                    test_registered_tool("gh", "c1"),
+                ],
+            )
+            .await;
         assert_eq!(state.tool_count().await, 2);
     }
 
     #[tokio::test]
     async fn clear_tools_empties_registry() {
         let state = ControllerState::new(None, String::new(), String::new());
-        state.set_tool("a".into(), test_tool("a")).await;
+        state
+            .set_tools_for_chamber("c1", vec![test_registered_tool("git", "c1")])
+            .await;
         state.clear_tools().await;
         assert_eq!(state.tool_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn set_tools_replaces_chamber_tools() {
+        let state = ControllerState::new(None, String::new(), String::new());
+        state
+            .set_tools_for_chamber("c1", vec![test_registered_tool("git", "c1")])
+            .await;
+        state
+            .set_tools_for_chamber("c1", vec![test_registered_tool("gh", "c1")])
+            .await;
+        assert_eq!(state.tool_count().await, 1);
+        assert!(state.get_tool("gh").await.is_some());
+        assert!(state.get_tool("git").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn remove_tools_for_chamber_only_affects_that_chamber() {
+        let state = ControllerState::new(None, String::new(), String::new());
+        state
+            .set_tools_for_chamber("c1", vec![test_registered_tool("git", "c1")])
+            .await;
+        state
+            .set_tools_for_chamber("c2", vec![test_registered_tool("gh", "c2")])
+            .await;
+        state.remove_tools_for_chamber("c1").await;
+        assert_eq!(state.tool_count().await, 1);
+        assert!(state.get_tool("gh").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn duplicate_tool_name_first_chamber_wins() {
+        let state = ControllerState::new(None, String::new(), String::new());
+        state
+            .set_tools_for_chamber("c1", vec![test_registered_tool("git", "c1")])
+            .await;
+        state
+            .set_tools_for_chamber("c2", vec![test_registered_tool("git", "c2")])
+            .await;
+        assert_eq!(state.tool_count().await, 1);
+        let (chamber, _, _) = state.get_tool("git").await.unwrap();
+        assert_eq!(chamber, "c1");
     }
 
     #[tokio::test]

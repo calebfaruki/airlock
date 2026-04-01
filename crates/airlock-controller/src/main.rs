@@ -14,7 +14,7 @@ struct Args {
     #[arg(long, default_value = "9090")]
     port: u16,
 
-    /// Kubernetes namespace to watch for AirlockTool CRDs.
+    /// Kubernetes namespace to watch for AirlockChamber CRDs.
     #[arg(long, default_value = "default")]
     namespace: String,
 
@@ -48,21 +48,7 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = ([0, 0, 0, 0], args.port).into();
     info!(%addr, namespace = %args.namespace, "starting airlock-controller");
 
-    let (tool_ready_tx, mut tool_ready_rx) = tokio::sync::watch::channel(false);
     let (chamber_ready_tx, mut chamber_ready_rx) = tokio::sync::watch::channel(false);
-
-    let tool_watcher_ns = args.namespace.clone();
-    let tool_watcher_state = state.clone();
-    let tool_watcher_handle = tokio::spawn(async move {
-        let client = match kube::Client::try_default().await {
-            Ok(c) => c,
-            Err(e) => {
-                error!("tool watcher kube client failed: {e}");
-                return Ok(());
-            }
-        };
-        watcher::watch_tools(client, &tool_watcher_ns, tool_watcher_state, tool_ready_tx).await
-    });
 
     let chamber_watcher_ns = args.namespace.clone();
     let chamber_watcher_state = state.clone();
@@ -86,13 +72,12 @@ async fn main() -> anyhow::Result<()> {
     let grpc_state = state.clone();
     let grpc_handle = tokio::spawn(async move {
         match tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            let _ = tool_ready_rx.wait_for(|&v| v).await;
             let _ = chamber_ready_rx.wait_for(|&v| v).await;
         })
         .await
         {
-            Ok(()) => info!("watcher initial syncs complete, starting gRPC server"),
-            Err(_) => warn!("watcher syncs timed out after 10s, starting gRPC server"),
+            Ok(()) => info!("watcher initial sync complete, starting gRPC server"),
+            Err(_) => warn!("watcher sync timed out after 10s, starting gRPC server"),
         }
 
         let (health_reporter, health_service) = tonic_health::server::health_reporter();
@@ -113,9 +98,6 @@ async fn main() -> anyhow::Result<()> {
     tokio::select! {
         result = grpc_handle => {
             error!("gRPC server exited: {:?}", result);
-        }
-        result = tool_watcher_handle => {
-            error!("tool watcher exited: {:?}", result);
         }
         result = chamber_watcher_handle => {
             error!("chamber watcher exited: {:?}", result);

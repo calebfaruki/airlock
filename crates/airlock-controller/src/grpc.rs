@@ -14,6 +14,8 @@ use airlock_proto::{
 use crate::job;
 use crate::state::{ControllerState, PendingCall, ToolCallResult};
 
+const TOOL_PARAMETERS_SCHEMA: &str = r#"{"type":"object","properties":{"command":{"type":"string","description":"The full command to execute"}},"required":["command"]}"#;
+
 pub struct ControllerService {
     state: Arc<ControllerState>,
 }
@@ -32,11 +34,11 @@ impl AirlockController for ControllerService {
     ) -> Result<Response<ListToolsResponse>, Status> {
         let tools = self.state.list_tools().await;
         let tool_infos: Vec<ToolInfo> = tools
-            .iter()
+            .into_iter()
             .map(|(name, tool)| ToolInfo {
-                name: name.clone(),
-                description: tool.spec.description.clone(),
-                parameters_json: r#"{"type":"object"}"#.to_string(),
+                name,
+                description: tool.description,
+                parameters_json: TOOL_PARAMETERS_SCHEMA.to_string(),
             })
             .collect();
 
@@ -50,39 +52,25 @@ impl AirlockController for ControllerService {
         let req = request.into_inner();
         let tool_name = &req.name;
 
-        let tool = self
+        let (chamber_name, image, _description) = self
             .state
             .get_tool(tool_name)
             .await
             .ok_or_else(|| Status::not_found(format!("unknown tool: {tool_name}")))?;
 
-        let chamber = self
-            .state
-            .get_chamber(&tool.spec.chamber)
-            .await
-            .ok_or_else(|| {
-                Status::failed_precondition(format!("chamber {} not found", tool.spec.chamber))
-            })?;
-
-        if tool.spec.max_calls > 0 {
-            let count = self.state.get_call_count(tool_name).await;
-            if count >= tool.spec.max_calls {
-                return Err(Status::resource_exhausted(format!(
-                    "tool {tool_name} has reached its invocation limit ({})",
-                    tool.spec.max_calls
-                )));
-            }
-            self.state.increment_call_count(tool_name).await;
-        }
+        let chamber = self.state.get_chamber(&chamber_name).await.ok_or_else(|| {
+            Status::failed_precondition(format!("chamber {chamber_name} not found"))
+        })?;
 
         let call_id = Uuid::new_v4().to_string();
-        let command_template = tool.spec.command.clone();
+        let command_template = "{command}".to_string();
         let working_dir = chamber.spec.workspace_mount_path.clone();
 
         if let Some(client) = self.state.kube_client() {
             let job_spec = job::build_tool_job(
                 tool_name,
-                &tool.spec,
+                &image,
+                &chamber_name,
                 &chamber.spec,
                 &call_id,
                 self.state.namespace(),
@@ -190,12 +178,14 @@ impl AirlockController for ControllerService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{AirlockChamber, AirlockChamberSpec, AirlockTool, AirlockToolSpec};
+    use crate::crd::{AirlockChamber, AirlockChamberSpec};
+    use crate::state::RegisteredTool;
 
     fn make_chamber(name: &str) -> AirlockChamber {
         AirlockChamber::new(
             name,
             AirlockChamberSpec {
+                image: None,
                 workspace: "workspace-data".to_string(),
                 workspace_mode: "readWrite".to_string(),
                 workspace_mount_path: "/workspace".to_string(),
@@ -206,17 +196,17 @@ mod tests {
         )
     }
 
-    fn make_tool(name: &str, description: &str, max_calls: u32) -> AirlockTool {
-        AirlockTool::new(
-            name,
-            AirlockToolSpec {
-                chamber: "test-chamber".to_string(),
-                description: description.to_string(),
+    async fn register_tools(state: &ControllerState, chamber: &str, tools: Vec<(&str, &str)>) {
+        let registered: Vec<RegisteredTool> = tools
+            .into_iter()
+            .map(|(name, desc)| RegisteredTool {
+                name: name.to_string(),
+                chamber_name: chamber.to_string(),
+                description: desc.to_string(),
                 image: "test:latest".to_string(),
-                command: "echo test".to_string(),
-                max_calls,
-            },
-        )
+            })
+            .collect();
+        state.set_tools_for_chamber(chamber, registered).await;
     }
 
     #[tokio::test]
@@ -233,15 +223,15 @@ mod tests {
     #[tokio::test]
     async fn list_tools_returns_registered_tools() {
         let state = ControllerState::new(None, String::new(), String::new());
-        state
-            .set_tool("git-push".into(), make_tool("git-push", "Push commits", 0))
-            .await;
-        state
-            .set_tool(
-                "git-commit".into(),
-                make_tool("git-commit", "Commit changes", 0),
-            )
-            .await;
+        register_tools(
+            &state,
+            "c1",
+            vec![
+                ("git-push", "Push commits"),
+                ("git-commit", "Commit changes"),
+            ],
+        )
+        .await;
 
         let svc = ControllerService::new(state);
         let resp = svc
@@ -252,11 +242,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_tools_parameters_json_is_valid_schema() {
+    async fn list_tools_parameters_json_has_command_property() {
         let state = ControllerState::new(None, String::new(), String::new());
-        state
-            .set_tool("test".into(), make_tool("test", "Test", 0))
-            .await;
+        register_tools(&state, "c1", vec![("test", "Test")]).await;
         let svc = ControllerService::new(state);
         let resp = svc
             .list_tools(Request::new(ListToolsRequest {}))
@@ -265,15 +253,18 @@ mod tests {
         let params: serde_json::Value =
             serde_json::from_str(&resp.get_ref().tools[0].parameters_json).unwrap();
         assert_eq!(params["type"], "object");
+        assert_eq!(params["properties"]["command"]["type"], "string");
+        assert!(params["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("command")));
     }
 
     #[tokio::test]
-    async fn list_tools_after_delete() {
+    async fn list_tools_after_chamber_removal() {
         let state = ControllerState::new(None, String::new(), String::new());
-        state
-            .set_tool("git-push".into(), make_tool("git-push", "Push commits", 0))
-            .await;
-        state.remove_tool("git-push").await;
+        register_tools(&state, "c1", vec![("git-push", "Push commits")]).await;
+        state.remove_tools_for_chamber("c1").await;
 
         let svc = ControllerService::new(state);
         let resp = svc
@@ -286,12 +277,8 @@ mod tests {
     #[tokio::test]
     async fn list_tools_after_update() {
         let state = ControllerState::new(None, String::new(), String::new());
-        state
-            .set_tool("git-push".into(), make_tool("git-push", "Old desc", 0))
-            .await;
-        state
-            .set_tool("git-push".into(), make_tool("git-push", "New desc", 0))
-            .await;
+        register_tools(&state, "c1", vec![("git-push", "Old desc")]).await;
+        register_tools(&state, "c1", vec![("git-push", "New desc")]).await;
 
         let svc = ControllerService::new(state);
         let resp = svc
@@ -319,9 +306,7 @@ mod tests {
     #[tokio::test]
     async fn call_tool_missing_chamber_returns_failed_precondition() {
         let state = ControllerState::new(None, String::new(), String::new());
-        state
-            .set_tool("echo".into(), make_tool("echo", "Echo tool", 0))
-            .await;
+        register_tools(&state, "test-chamber", vec![("echo", "Echo tool")]).await;
 
         let svc = ControllerService::new(state);
         let err = svc
@@ -337,9 +322,7 @@ mod tests {
     #[tokio::test]
     async fn call_tool_round_trip() {
         let state = ControllerState::new(None, String::new(), String::new());
-        state
-            .set_tool("echo".into(), make_tool("echo", "Echo tool", 0))
-            .await;
+        register_tools(&state, "test-chamber", vec![("echo", "Echo tool")]).await;
         state
             .set_chamber("test-chamber".into(), make_chamber("test-chamber"))
             .await;
@@ -351,7 +334,7 @@ mod tests {
             svc_clone
                 .call_tool(Request::new(CallToolRequest {
                     name: "echo".to_string(),
-                    input_json: r#"{"msg":"hello"}"#.to_string(),
+                    input_json: r#"{"command":"echo hello"}"#.to_string(),
                 }))
                 .await
         });
@@ -370,8 +353,8 @@ mod tests {
         .unwrap()
         .into_inner();
 
-        assert_eq!(assignment.input_json, r#"{"msg":"hello"}"#);
-        assert_eq!(assignment.command_template, "echo test");
+        assert_eq!(assignment.input_json, r#"{"command":"echo hello"}"#);
+        assert_eq!(assignment.command_template, "{command}");
 
         svc.send_tool_result(Request::new(SendToolResultRequest {
             call_id: assignment.call_id,
@@ -392,72 +375,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn max_calls_enforced() {
-        let state = ControllerState::new(None, String::new(), String::new());
-        state
-            .set_tool("limited".into(), make_tool("limited", "test", 1))
-            .await;
-        state
-            .set_chamber("test-chamber".into(), make_chamber("test-chamber"))
-            .await;
-
-        let svc = Arc::new(ControllerService::new(state.clone()));
-
-        let svc_clone = svc.clone();
-        let call_handle = tokio::spawn(async move {
-            svc_clone
-                .call_tool(Request::new(CallToolRequest {
-                    name: "limited".to_string(),
-                    input_json: "{}".to_string(),
-                }))
-                .await
-        });
-
-        tokio::task::yield_now().await;
-
-        let assignment = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            svc.get_tool_call(Request::new(GetToolCallRequest {
-                job_id: "job-1".to_string(),
-                tool_name: "limited".to_string(),
-            })),
-        )
-        .await
-        .expect("get_tool_call timed out")
-        .unwrap()
-        .into_inner();
-
-        svc.send_tool_result(Request::new(SendToolResultRequest {
-            call_id: assignment.call_id,
-            output: "ok".to_string(),
-            is_error: false,
-            exit_code: 0,
-        }))
-        .await
-        .unwrap();
-
-        tokio::time::timeout(std::time::Duration::from_secs(2), call_handle)
-            .await
-            .expect("call_tool timed out")
-            .unwrap()
-            .unwrap();
-
-        let err = svc
-            .call_tool(Request::new(CallToolRequest {
-                name: "limited".to_string(),
-                input_json: "{}".to_string(),
-            }))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::ResourceExhausted);
-    }
-
-    #[tokio::test]
     async fn get_tool_call_blocks_until_enqueued() {
         let state = ControllerState::new(None, String::new(), String::new());
-        state
-            .set_tool("tool".into(), make_tool("tool", "test tool", 0))
-            .await;
+        register_tools(&state, "test-chamber", vec![("tool", "test tool")]).await;
         state
             .set_chamber("test-chamber".into(), make_chamber("test-chamber"))
             .await;
@@ -482,7 +402,7 @@ mod tests {
             let _ = svc_for_call
                 .call_tool(Request::new(CallToolRequest {
                     name: "tool".to_string(),
-                    input_json: r#"{"x":"1"}"#.to_string(),
+                    input_json: r#"{"command":"test"}"#.to_string(),
                 }))
                 .await;
         });
@@ -494,62 +414,7 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        assert_eq!(assignment.input_json, r#"{"x":"1"}"#);
-    }
-
-    #[tokio::test]
-    async fn max_calls_zero_unlimited() {
-        let state = ControllerState::new(None, String::new(), String::new());
-        state
-            .set_tool("unlimited".into(), make_tool("unlimited", "no limit", 0))
-            .await;
-        state
-            .set_chamber("test-chamber".into(), make_chamber("test-chamber"))
-            .await;
-
-        let svc = Arc::new(ControllerService::new(state.clone()));
-
-        for i in 0..5 {
-            let svc_clone = svc.clone();
-            let call_handle = tokio::spawn(async move {
-                svc_clone
-                    .call_tool(Request::new(CallToolRequest {
-                        name: "unlimited".to_string(),
-                        input_json: format!("{{\"{i}\":\"v\"}}"),
-                    }))
-                    .await
-            });
-
-            tokio::task::yield_now().await;
-
-            let assignment = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                svc.get_tool_call(Request::new(GetToolCallRequest {
-                    job_id: format!("job-{i}"),
-                    tool_name: "unlimited".to_string(),
-                })),
-            )
-            .await
-            .expect("get_tool_call timed out")
-            .unwrap()
-            .into_inner();
-
-            svc.send_tool_result(Request::new(SendToolResultRequest {
-                call_id: assignment.call_id,
-                output: "ok".to_string(),
-                is_error: false,
-                exit_code: 0,
-            }))
-            .await
-            .unwrap();
-
-            let resp = tokio::time::timeout(std::time::Duration::from_secs(2), call_handle)
-                .await
-                .expect("call_tool timed out")
-                .unwrap()
-                .unwrap();
-            assert!(!resp.get_ref().is_error);
-        }
+        assert_eq!(assignment.input_json, r#"{"command":"test"}"#);
     }
 
     #[tokio::test]

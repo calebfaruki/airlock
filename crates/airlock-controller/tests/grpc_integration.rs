@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use airlock_controller::crd::{AirlockChamber, AirlockChamberSpec, AirlockTool, AirlockToolSpec};
+use airlock_controller::crd::{AirlockChamber, AirlockChamberSpec};
 use airlock_controller::grpc::ControllerService;
-use airlock_controller::state::ControllerState;
+use airlock_controller::state::{ControllerState, RegisteredTool};
 use airlock_proto::airlock_controller_client::AirlockControllerClient;
 use airlock_proto::airlock_controller_server::AirlockControllerServer;
 use airlock_proto::{CallToolRequest, GetToolCallRequest, ListToolsRequest, SendToolResultRequest};
@@ -33,6 +33,7 @@ fn make_chamber(name: &str) -> AirlockChamber {
     AirlockChamber::new(
         name,
         AirlockChamberSpec {
+            image: None,
             workspace: "workspace-data".to_string(),
             workspace_mode: "readWrite".to_string(),
             workspace_mount_path: "/workspace".to_string(),
@@ -43,25 +44,23 @@ fn make_chamber(name: &str) -> AirlockChamber {
     )
 }
 
-fn make_tool(name: &str, description: &str) -> AirlockTool {
-    AirlockTool::new(
-        name,
-        AirlockToolSpec {
-            chamber: "test-chamber".to_string(),
-            description: description.to_string(),
+async fn register_tools(state: &ControllerState, chamber: &str, tools: Vec<(&str, &str)>) {
+    let registered: Vec<RegisteredTool> = tools
+        .into_iter()
+        .map(|(name, desc)| RegisteredTool {
+            name: name.to_string(),
+            chamber_name: chamber.to_string(),
+            description: desc.to_string(),
             image: "test:latest".to_string(),
-            command: "echo {msg}".to_string(),
-            max_calls: 0,
-        },
-    )
+        })
+        .collect();
+    state.set_tools_for_chamber(chamber, registered).await;
 }
 
 #[tokio::test]
 async fn list_tools_over_grpc() {
     let (url, state) = start_server().await;
-    state
-        .set_tool("git-push".into(), make_tool("git-push", "Push commits"))
-        .await;
+    register_tools(&state, "test-chamber", vec![("git-push", "Push commits")]).await;
 
     let mut client = AirlockControllerClient::connect(url).await.unwrap();
     let resp = client
@@ -98,9 +97,7 @@ async fn get_tool_call_blocks_over_grpc() {
 #[tokio::test]
 async fn call_tool_round_trip_over_grpc() {
     let (url, state) = start_server().await;
-    state
-        .set_tool("echo".into(), make_tool("echo", "Echo tool"))
-        .await;
+    register_tools(&state, "test-chamber", vec![("echo", "Echo tool")]).await;
     state
         .set_chamber("test-chamber".into(), make_chamber("test-chamber"))
         .await;
@@ -119,7 +116,7 @@ async fn call_tool_round_trip_over_grpc() {
             .unwrap()
             .into_inner();
 
-        assert_eq!(assignment.command_template, "echo {msg}");
+        assert_eq!(assignment.command_template, "{command}");
 
         client
             .send_tool_result(SendToolResultRequest {
@@ -136,7 +133,7 @@ async fn call_tool_round_trip_over_grpc() {
     let resp = client
         .call_tool(CallToolRequest {
             name: "echo".into(),
-            input_json: r#"{"msg":"hello world"}"#.into(),
+            input_json: r#"{"command":"echo hello world"}"#.into(),
         })
         .await
         .unwrap()

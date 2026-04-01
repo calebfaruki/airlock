@@ -1,9 +1,0 @@
-apiVersion: airlock.dev/v1
-kind: AirlockTool
-metadata:
-  name: git-commit
-spec:
-  chamber: workspace-rw
-  description: "Commit staged changes with a message"
-  image: ghcr.io/calebfaruki/airlock-git:latest
-  command: "git commit"

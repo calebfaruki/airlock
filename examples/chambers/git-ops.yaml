@@ -3,6 +3,7 @@ kind: AirlockChamber
 metadata:
   name: git-ops
 spec:
+  image: ghcr.io/calebfaruki/airlock-git:latest
   workspace: workspace-data
   workspaceMode: readWrite
   credentials:

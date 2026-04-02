@@ -59,6 +59,22 @@ fn parse_image_ref(image: &str) -> ImageRef {
     }
 }
 
+fn registry_scheme(registry: &str) -> &'static str {
+    let host = registry
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(registry);
+    if host == "localhost"
+        || host == "127.0.0.1"
+        || host == "[::1]"
+        || host == "host.docker.internal"
+    {
+        "http"
+    } else {
+        "https"
+    }
+}
+
 pub fn parse_tools_label(label_value: &str) -> Result<Vec<DiscoveredTool>, RegistryError> {
     let parsed: serde_json::Value = serde_json::from_str(label_value)
         .map_err(|e| RegistryError::InvalidLabel(format!("not valid JSON: {e}")))?;
@@ -126,8 +142,9 @@ pub async fn discover_tools(image_ref: &str) -> Result<Vec<DiscoveredTool>, Regi
     };
 
     // Fetch manifest
+    let scheme = registry_scheme(&parsed.registry);
     let manifest_url = format!(
-        "https://{}/v2/{}/manifests/{}",
+        "{scheme}://{}/v2/{}/manifests/{}",
         parsed.registry, parsed.repository, parsed.reference
     );
     let mut req = client.get(&manifest_url).header(
@@ -149,7 +166,7 @@ pub async fn discover_tools(image_ref: &str) -> Result<Vec<DiscoveredTool>, Regi
             .as_str()
             .ok_or_else(|| RegistryError::UnexpectedResponse("manifest missing digest".into()))?;
         let url = format!(
-            "https://{}/v2/{}/manifests/{}",
+            "{scheme}://{}/v2/{}/manifests/{}",
             parsed.registry, parsed.repository, digest
         );
         let mut req = client.get(&url).header(
@@ -171,7 +188,7 @@ pub async fn discover_tools(image_ref: &str) -> Result<Vec<DiscoveredTool>, Regi
 
     // Fetch config blob
     let config_url = format!(
-        "https://{}/v2/{}/blobs/{}",
+        "{scheme}://{}/v2/{}/blobs/{}",
         parsed.registry, parsed.repository, config_digest
     );
     let mut req = client.get(&config_url);
@@ -288,5 +305,29 @@ mod tests {
     fn parse_image_ref_no_tag() {
         let r = parse_image_ref("ghcr.io/org/image");
         assert_eq!(r.reference, "latest");
+    }
+
+    #[test]
+    fn scheme_localhost_is_http() {
+        assert_eq!(registry_scheme("localhost:5000"), "http");
+        assert_eq!(registry_scheme("localhost"), "http");
+    }
+
+    #[test]
+    fn scheme_loopback_is_http() {
+        assert_eq!(registry_scheme("127.0.0.1:5000"), "http");
+        assert_eq!(registry_scheme("[::1]:5000"), "http");
+    }
+
+    #[test]
+    fn scheme_docker_internal_is_http() {
+        assert_eq!(registry_scheme("host.docker.internal:5000"), "http");
+    }
+
+    #[test]
+    fn scheme_remote_is_https() {
+        assert_eq!(registry_scheme("ghcr.io"), "https");
+        assert_eq!(registry_scheme("registry-1.docker.io"), "https");
+        assert_eq!(registry_scheme("my-registry.example.com:5000"), "https");
     }
 }

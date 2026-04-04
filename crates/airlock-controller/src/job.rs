@@ -79,7 +79,7 @@ pub fn build_tool_job(
                 value_from: Some(EnvVarSource {
                     secret_key_ref: Some(SecretKeySelector {
                         name: cred.secret.clone(),
-                        key: cred.key.clone().unwrap_or_else(|| cred.secret.clone()),
+                        key: cred.secret.clone(),
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -88,24 +88,17 @@ pub fn build_tool_job(
             });
         } else if let Some(ref file_path) = cred.file {
             let vol_name = format!("cred-{i}");
-            let (items, sub_path) = match &cred.key {
-                Some(key) => {
-                    let basename = std::path::Path::new(file_path)
-                        .file_name()
-                        .and_then(|f| f.to_str())
-                        .unwrap_or("key")
-                        .to_string();
-                    (
-                        Some(vec![KeyToPath {
-                            key: key.clone(),
-                            path: basename.clone(),
-                            ..Default::default()
-                        }]),
-                        Some(basename),
-                    )
-                }
-                None => (None, None),
-            };
+            let basename = std::path::Path::new(file_path)
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or(&cred.secret)
+                .to_string();
+            let items = Some(vec![KeyToPath {
+                key: cred.secret.clone(),
+                path: basename.clone(),
+                ..Default::default()
+            }]);
+            let sub_path = Some(basename);
             volumes.push(Volume {
                 name: vol_name.clone(),
                 secret: Some(SecretVolumeSource {
@@ -358,7 +351,6 @@ mod tests {
         let mut chamber = base_chamber_spec();
         chamber.credentials.push(CredentialMapping {
             secret: "github-token".to_string(),
-            key: Some("token".to_string()),
             env: Some("GITHUB_TOKEN".to_string()),
             file: None,
         });
@@ -375,7 +367,7 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(secret_ref.name, "github-token");
-        assert_eq!(secret_ref.key, "token");
+        assert_eq!(secret_ref.key, "github-token");
     }
 
     #[test]
@@ -383,9 +375,8 @@ mod tests {
         let mut chamber = base_chamber_spec();
         chamber.credentials.push(CredentialMapping {
             secret: "git-ssh-key".to_string(),
-            key: Some("id_ed25519".to_string()),
             env: None,
-            file: Some("/run/secrets/airlock/git/id_ed25519".to_string()),
+            file: Some("/root/.ssh/id_ed25519".to_string()),
         });
 
         let job = test_job(&chamber);
@@ -393,11 +384,11 @@ mod tests {
         let cred_vol = volumes.iter().find(|v| v.name == "cred-0").unwrap();
         let secret = cred_vol.secret.as_ref().unwrap();
         assert_eq!(secret.secret_name.as_deref(), Some("git-ssh-key"));
-        assert_eq!(secret.items.as_ref().unwrap()[0].key, "id_ed25519");
+        assert_eq!(secret.items.as_ref().unwrap()[0].key, "git-ssh-key");
 
         let mounts = container(&job).volume_mounts.as_ref().unwrap();
         let cred_mount = mounts.iter().find(|m| m.name == "cred-0").unwrap();
-        assert_eq!(cred_mount.mount_path, "/run/secrets/airlock/git/id_ed25519");
+        assert_eq!(cred_mount.mount_path, "/root/.ssh/id_ed25519");
         assert_eq!(cred_mount.sub_path.as_deref(), Some("id_ed25519"));
         assert_eq!(cred_mount.read_only, Some(true));
     }
@@ -441,7 +432,6 @@ mod tests {
         let mut chamber = base_chamber_spec();
         chamber.credentials.push(CredentialMapping {
             secret: "db-url".to_string(),
-            key: None,
             env: Some("DATABASE_URL".to_string()),
             file: None,
         });
@@ -454,7 +444,6 @@ mod tests {
         let mut chamber = base_chamber_spec();
         chamber.credentials.push(CredentialMapping {
             secret: "stripe-key".to_string(),
-            key: Some("api_key".to_string()),
             env: Some("STRIPE_KEY".to_string()),
             file: None,
         });
@@ -470,14 +459,13 @@ mod tests {
         let mut chamber = base_chamber_spec();
         chamber.credentials.push(CredentialMapping {
             secret: "ssh-key".to_string(),
-            key: Some("id_ed25519".to_string()),
             env: None,
-            file: Some("/run/secrets/ssh/id_ed25519".to_string()),
+            file: Some("/root/.ssh/id_ed25519".to_string()),
         });
         let job = test_job(&chamber);
         let json: Vec<serde_json::Value> = serde_json::from_str(&scrub_env(&job).unwrap()).unwrap();
         assert_eq!(json[0]["name"], "ssh-key");
-        assert_eq!(json[0]["file"], "/run/secrets/ssh/id_ed25519");
+        assert_eq!(json[0]["file"], "/root/.ssh/id_ed25519");
         assert!(json[0].get("env").is_none());
     }
 

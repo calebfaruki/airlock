@@ -43,8 +43,6 @@ pub struct AirlockChamberSpec {
 pub struct CredentialMapping {
     pub secret: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
@@ -72,8 +70,7 @@ mod tests {
             "workspaceMountPath": "/workspace",
             "credentials": [{
                 "secret": "git-ssh-key",
-                "key": "id_ed25519",
-                "file": "/run/secrets/airlock/git/id_ed25519"
+                "file": "/root/.ssh/id_ed25519"
             }],
             "egress": [{
                 "host": "github.com",

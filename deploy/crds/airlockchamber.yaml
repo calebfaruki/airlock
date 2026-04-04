@@ -44,9 +44,6 @@ spec:
                     file:
                       nullable: true
                       type: string
-                    key:
-                      nullable: true
-                      type: string
                     secret:
                       type: string
                   required:

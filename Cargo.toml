@@ -7,7 +7,7 @@ version = "0.6.0"
 edition = "2021"
 
 [workspace.dependencies]
-tonic = "0.13"
+tonic = "0.14"
 tonic-health = "0.13"
 prost = "0.13"
 tokio = { version = "1", features = ["full"] }
